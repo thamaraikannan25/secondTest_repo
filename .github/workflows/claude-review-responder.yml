@@ -1,0 +1,23 @@
+# .github/workflows/claude-review-responder.yml
+name: Send PR comments to Claude Routine
+
+on:
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  notify-claude:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire Claude routine
+        run: |
+          curl -X POST "${{ https://api.anthropic.com/v1/claude_code/routines/trig_018DXcjFEWRtsX5izjPZ34Aj/fire }}" \
+            -H "Authorization: Bearer ${{ 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 }}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "PR #${{ github.event.pull_request.number }} received a review comment from ${{ github.event.comment.user.login }}. Comment: ${{ github.event.comment.body }}. File: ${{ github.event.comment.path }}. Please read the full PR diff and apply a fix."
+            }'
