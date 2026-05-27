@@ -14,14 +14,19 @@ if (isDryRun) {
 const client = new Anthropic.Anthropic();
 
 async function reviewPR() {
-  const response = await client.messages.create({
-    model: model,
-    max_tokens: 1024,
-    messages: [
-      { role: "user", content: "Review this PR and provide feedback." }
-    ]
-  });
-  console.log(response.content[0].text);
+  try {
+    const response = await client.messages.create({
+      model: model,
+      max_tokens: 1024,
+      messages: [
+        { role: "user", content: "Review this PR and provide feedback." }
+      ]
+    });
+    console.log(response.content[0].text);
+  } catch (error) {
+    console.error("Claude review failed (non-fatal):", error.message);
+    process.exit(0);
+  }
 }
 
 reviewPR();
