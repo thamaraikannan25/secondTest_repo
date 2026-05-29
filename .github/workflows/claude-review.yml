@@ -2,30 +2,33 @@ name: Claude PR Review
 
 on:
   pull_request:
-    types: [opened] #types: [opened, synchronize]   # opened = new PR, synchronize = new commit pushed
+    types: [opened]
+    branches:
+      - main
 
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 5
     permissions:
-      pull-requests: write       # allows posting PR comments
-      contents: read             # allows reading repo code
-    
+      contents: read
+      pull-requests: write
+      issues: write
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          fetch-depth: 0
 
-      - name: Install dependencies
-        run: npm install @anthropic-ai/sdk
-
-      - name: Run Claude Review
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_MODEL: "claude-sonnet-4-6"
-        run: node review.js
+      - name: Run Claude PR Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: "claude-sonnet-4-6"
+          direct_prompt: |
+            Please review this PR and provide feedback:
+            - Post inline comments on specific lines with issues
+            - Check for bugs, security issues, and code quality
+            - Request changes if fixes are needed
+            - Approve if everything looks good
