@@ -17,6 +17,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      id-token: write
 
     steps:
       - name: Checkout code
@@ -28,8 +29,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: "claude-sonnet-4-6"
-          direct_prompt: |
+          claude_args: "--model claude-sonnet-4-6"
+          prompt: |
             Please review this PR and provide feedback:
             - Post inline comments on specific lines with issues
             - Check for bugs, security issues, and code quality
