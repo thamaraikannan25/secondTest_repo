@@ -1,66 +1,130 @@
 import React, { useState } from 'react';
-import './LoginForm.css';
 
-const DEMO_CREDENTIALS = { username: 'admin', password: 'password' };
-
-export default function LoginForm({ onLogin }) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+function LoginForm() {
+  const [formData, setFormData] = useState({ email: '', password: '' });
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData((prev) => ({ ...prev, [name]: value }));
     setError('');
-    setLoading(true);
-
-    await new Promise((r) => setTimeout(r, 500));
-
-    if (
-      username === DEMO_CREDENTIALS.username &&
-      password === DEMO_CREDENTIALS.password
-    ) {
-      onLogin(username);
-    } else {
-      setError('Invalid username or password.');
-    }
-    setLoading(false);
   };
 
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!formData.email || !formData.password) {
+      setError('Email and password are required.');
+      return;
+    }
+    setSuccess(true);
+  };
+
+  if (success) {
+    return (
+      <div style={styles.container}>
+        <p style={styles.successMsg}>Login successful! Welcome.</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="login-container">
-      <form className="login-form" onSubmit={handleSubmit}>
-        <h2>Sign In</h2>
-        {error && <p className="login-error">{error}</p>}
-        <div className="form-group">
-          <label htmlFor="username">Username</label>
-          <input
-            id="username"
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="Enter username"
-            required
-            autoComplete="username"
-          />
-        </div>
-        <div className="form-group">
-          <label htmlFor="password">Password</label>
-          <input
-            id="password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Enter password"
-            required
-            autoComplete="current-password"
-          />
-        </div>
-        <button type="submit" disabled={loading}>
-          {loading ? 'Signing in…' : 'Sign In'}
-        </button>
-        <p className="login-hint">Demo credentials: admin / password</p>
-      </form>
+    <div style={styles.container}>
+      <div style={styles.card}>
+        <h2 style={styles.title}>Sign In</h2>
+        <form onSubmit={handleSubmit} noValidate>
+          <div style={styles.field}>
+            <label style={styles.label} htmlFor="email">Email</label>
+            <input
+              style={styles.input}
+              id="email"
+              name="email"
+              type="email"
+              placeholder="you@example.com"
+              value={formData.email}
+              onChange={handleChange}
+            />
+          </div>
+          <div style={styles.field}>
+            <label style={styles.label} htmlFor="password">Password</label>
+            <input
+              style={styles.input}
+              id="password"
+              name="password"
+              type="password"
+              placeholder="••••••••"
+              value={formData.password}
+              onChange={handleChange}
+            />
+          </div>
+          {error && <p style={styles.error}>{error}</p>}
+          <button style={styles.button} type="submit">Log In</button>
+        </form>
+      </div>
     </div>
   );
 }
+
+const styles = {
+  container: {
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    minHeight: '100vh',
+    background: '#f0f2f5',
+    fontFamily: 'sans-serif',
+  },
+  card: {
+    background: '#fff',
+    padding: '2rem',
+    borderRadius: '8px',
+    boxShadow: '0 2px 12px rgba(0,0,0,0.1)',
+    width: '100%',
+    maxWidth: '360px',
+  },
+  title: {
+    marginBottom: '1.5rem',
+    textAlign: 'center',
+    fontSize: '1.5rem',
+    color: '#1a1a2e',
+  },
+  field: {
+    marginBottom: '1rem',
+  },
+  label: {
+    display: 'block',
+    marginBottom: '0.3rem',
+    fontSize: '0.875rem',
+    color: '#555',
+  },
+  input: {
+    width: '100%',
+    padding: '0.6rem 0.75rem',
+    border: '1px solid #ccc',
+    borderRadius: '4px',
+    fontSize: '1rem',
+    boxSizing: 'border-box',
+  },
+  error: {
+    color: '#e74c3c',
+    fontSize: '0.85rem',
+    marginBottom: '0.75rem',
+  },
+  button: {
+    width: '100%',
+    padding: '0.75rem',
+    background: '#4f46e5',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '4px',
+    fontSize: '1rem',
+    cursor: 'pointer',
+    marginTop: '0.5rem',
+  },
+  successMsg: {
+    fontSize: '1.2rem',
+    color: '#27ae60',
+  },
+};
+
+export default LoginForm;
