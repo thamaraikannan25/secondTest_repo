@@ -1,56 +1,58 @@
-name: Claude PR Review
+name: Claude PR Review & Auto Fix
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [labeled]
     branches:
-      - main
-  issue_comment:
-    types: [created]
+      - test-claude-workflow
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  review:
+  review-and-fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    if: |
-      (github.event_name == 'pull_request') ||
-      (github.event_name == 'issue_comment' && 
-       github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '@claude'))
+    timeout-minutes: 30
+    if: github.event.label.name == 'claude-review'
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
       issues: write
       id-token: write
 
     steps:
-      - name: Debug Event Info
-        run: |
-          echo "Event name: ${{ github.event_name }}"
-          echo "Comment body: ${{ github.event.comment.body }}"
-          echo "PR number: ${{ github.event.issue.number }}"
-          echo "API Key set: ${{ secrets.ANTHROPIC_API_KEY != '' }}"
-
-      - name: Checkout code
+      - name: Checkout PR Branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run Claude PR Review
-        uses: anthropics/claude-code-action@v1
+      - name: Configure Git
+        run: |
+          git config user.name "claude-bot"
+          git config user.email "claude-bot@users.noreply.github.com"
+
+      - name: Dry Run — Verify Workflow
+        uses: actions/github-script@v7
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          trigger_phrase: "@claude"
-          claude_args: >-
-            --model claude-sonnet-4-6
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*)"
-          prompt: |
-            Please review this PR and provide feedback:
-            - Post inline comments on specific lines with issues
-            - Check for bugs, security issues, and code quality
-            - Request changes if fixes are needed
-            - Approve if everything looks good
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## 🧪 DRY RUN MODE — Workflow Triggered Successfully!
+              
+              ✅ Label trigger working
+              ✅ GitHub token working  
+              ✅ Permissions working
+              ✅ Checkout working
+              
+              🔍 **Step 1 — Review:** Would analyze PR diff and post inline comments
+              🔧 **Step 2 — Fix:** Would apply fixes, commit and push
+              🔄 **Step 3 — Re-Review:** Would verify fixes and approve
+              
+              > Dry run complete — no Claude API used`
+            });
+            console.log('Dry run comment posted successfully');
