@@ -1,27 +1,16 @@
-const Anthropic = require("@anthropic-ai/sdk");
+const { thinkAboutPR } = require("./think");
 
-const model = process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
+async function reviewPR(prDiff) {
+  const { review } = await thinkAboutPR(prDiff);
+  console.log(review);
+}
 
-// TEMP: remove once real API key is added
-const isDryRun = !process.env.ANTHROPIC_API_KEY || 
-                 process.env.ANTHROPIC_API_KEY === 'placeholder';
-
-if (isDryRun) {
-  console.log("DRY RUN: API key not set yet, skipping Claude call");
+const prDiff = process.env.PR_DIFF || "";
+if (!prDiff) {
+  console.log("No PR_DIFF provided, skipping review.");
   process.exit(0);
 }
-
-const client = new Anthropic.Anthropic();
-
-async function reviewPR() {
-  const response = await client.messages.create({
-    model: model,
-    max_tokens: 1024,
-    messages: [
-      { role: "user", content: "Review this PR and provide feedback." }
-    ]
-  });
-  console.log(response.content[0].text);
-}
-
-reviewPR();
+reviewPR(prDiff).catch((err) => {
+  console.error("Review failed:", err.message);
+  process.exit(1);
+});
