@@ -12,7 +12,7 @@ env:
 jobs:
   review-and-fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     if: github.event.label.name == 'claude-review'
     permissions:
       contents: write
@@ -33,26 +33,122 @@ jobs:
           git config user.name "claude-bot"
           git config user.email "claude-bot@users.noreply.github.com"
 
-      - name: Dry Run — Verify Workflow
-        uses: actions/github-script@v7
+      - name: Get Pre-Existing and New Files
+        run: |
+          git fetch origin main
+          git diff --name-only origin/main..HEAD > /tmp/new_files.txt
+          git ls-tree -r origin/main --name-only > /tmp/existing_files.txt
+          echo "=== New files in this PR ==="
+          cat /tmp/new_files.txt
+          echo "=== Pre-existing files in main ==="
+          cat /tmp/existing_files.txt
+
+      - name: Claude Auto Review → Fix → Re-Review (Max 3 Loops)
+        uses: anthropics/claude-code-action@v1
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `## 🧪 DRY RUN MODE — Workflow Triggered Successfully!
-              
-              ✅ Label trigger working
-              ✅ GitHub token working  
-              ✅ Permissions working
-              ✅ Checkout working
-              
-              🔍 **Step 1 — Review:** Would analyze PR diff and post inline comments
-              🔧 **Step 2 — Fix:** Would apply fixes, commit and push
-              🔄 **Step 3 — Re-Review:** Would verify fixes and approve
-              
-              > Dry run complete — no Claude API used`
-            });
-            console.log('Dry run comment posted successfully');
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*)"
+          prompt: |
+            You are a fully autonomous code reviewer and fixer.
+            No manual intervention — you handle EVERYTHING.
+            Maximum 3 review+fix loops allowed.
+
+            ## STRICT RULES:
+            - NEVER ask developer to fix anything
+            - NEVER say "manual intervention required"
+            - NEVER delete files in /tmp/existing_files.txt (pre-existing files)
+            - You MAY delete files in /tmp/new_files.txt (newly added files) if problematic
+            - Always read domain files before making fixes
+            - Maximum 3 loops — on loop 3 if issues remain post final comment and STOP
+
+            ## LOOP STRUCTURE (repeat max 3 times):
+
+            ### REVIEW PHASE:
+            - Run: gh pr diff to get full PR diff
+            - Read /tmp/new_files.txt — files added in this PR
+            - Read /tmp/existing_files.txt — files that existed before PR
+            - Check all changed files for:
+              * Bugs and unhandled errors
+              * Security vulnerabilities
+              * Code quality issues
+              * Dead code or unreferenced new files
+              * Missing tests for new files
+              * Placeholder or meaningless values
+            - Post inline comments on every problem line
+            - Post comment:
+              "## 🔍 Claude Review — Loop [N]/3
+               Found **X issue(s)**:
+               - [list each issue with filename and line]
+               ⚙️ Auto-fixing now..."
+
+            ### FIX PHASE (immediately after review):
+
+            **Dead code / unreferenced file:**
+            - Is it in /tmp/new_files.txt? → DELETE it
+            - Is it in /tmp/existing_files.txt? → NEVER delete, add reference or test
+
+            **Missing tests:**
+            - Read existing test files for patterns
+            - Write proper test following same pattern
+            - Use real domain values from entities.py
+
+            **Placeholder values:**
+            - Read api/entities.py and domain files
+            - Replace with meaningful real values
+
+            **Bugs / security issues:**
+            - Fix code directly
+
+            After fixing ALL issues:
+            - git add .
+            - git commit -m "fix: claude loop [N] — [describe fixes]"
+            - git push
+            - Post comment:
+              "## 🔧 Claude Auto-Fix — Loop [N]/3
+               Fixed:
+               - [list every fix with filename]
+               🔄 Re-reviewing..."
+
+            ### DECISION AFTER RE-REVIEW:
+
+            If zero issues AND loop any:
+            → Post FINAL SUCCESS comment and STOP
+
+            If issues remain AND loop < 3:
+            → Start next loop immediately
+
+            If issues remain AND loop = 3:
+            → Post FINAL WARNING comment and STOP
+
+            ---
+
+            ## FINAL SUCCESS COMMENT (when zero issues):
+            "## ✅ Claude Review Complete — All Clear!
+             All issues resolved automatically in [N] loop(s).
+
+             **Summary of fixes:**
+             - [complete list of all fixes across all loops]
+
+             **Files protected (not deleted):**
+             - [pre-existing files that were safely kept]
+
+             **Files removed (new files that were problematic):**
+             - [newly added files that were deleted if any]
+
+             👨‍💻 **PR is ready for your approval.
+             Please review Claude's changes and approve to merge.**"
+
+            ## FINAL WARNING COMMENT (after 3 loops, issues remain):
+            "## ⚠️ Claude Review — 3 Loops Completed
+
+             **Auto-fixed in this session:**
+             - [list everything fixed across 3 loops]
+
+             **Still requires attention:**
+             - [list remaining issues with filename and line]
+             - [explain why each could not be auto-fixed]
+
+             🔍 **These issues need developer review before merging.**"
