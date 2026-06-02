@@ -38,12 +38,14 @@ jobs:
           git fetch origin main
           git diff --name-only origin/main..HEAD > /tmp/new_files.txt
           git ls-tree -r origin/main --name-only > /tmp/existing_files.txt
-          echo "=== New files in this PR ==="
-          cat /tmp/new_files.txt
-          echo "=== Pre-existing files in main ==="
-          cat /tmp/existing_files.txt
+          echo "=== New files ===" && cat /tmp/new_files.txt
+          echo "=== Existing files ===" && cat /tmp/existing_files.txt
 
-      - name: Claude Auto Review → Fix → Re-Review (Max 3 Loops)
+      # ─────────────────────────────────────────
+      # LOOP 1 — Review + Fix
+      # ─────────────────────────────────────────
+      - name: Claude Loop 1 — Review & Fix
+        id: loop1
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -52,103 +54,160 @@ jobs:
             --model claude-sonnet-4-6
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*)"
           prompt: |
-            You are a fully autonomous code reviewer and fixer.
-            No manual intervention — you handle EVERYTHING.
-            Maximum 3 review+fix loops allowed.
+            You are a fully autonomous code reviewer and fixer. This is LOOP 1 of 3.
 
             ## STRICT RULES:
             - NEVER ask developer to fix anything
-            - NEVER say "manual intervention required"
-            - NEVER delete files in /tmp/existing_files.txt (pre-existing files)
-            - You MAY delete files in /tmp/new_files.txt (newly added files) if problematic
-            - Always read domain files before making fixes
-            - Maximum 3 loops — on loop 3 if issues remain post final comment and STOP
+            - NEVER delete files listed in /tmp/existing_files.txt
+            - You MAY delete files listed in /tmp/new_files.txt if problematic
+            - Read domain files before making any fixes
+            - Write result to /tmp/loop1_status.txt → either "ISSUES_FIXED" or "ALL_CLEAR"
 
-            ## LOOP STRUCTURE (repeat max 3 times):
-
-            ### REVIEW PHASE:
+            ## STEP 1 — REVIEW:
             - Run: gh pr diff to get full PR diff
-            - Read /tmp/new_files.txt — files added in this PR
-            - Read /tmp/existing_files.txt — files that existed before PR
-            - Check all changed files for:
-              * Bugs and unhandled errors
-              * Security vulnerabilities
-              * Code quality issues
-              * Dead code or unreferenced new files
-              * Missing tests for new files
-              * Placeholder or meaningless values
+            - Review all changed files for bugs, security, quality, dead code, missing tests
             - Post inline comments on every problem line
             - Post comment:
-              "## 🔍 Claude Review — Loop [N]/3
+              "## 🔍 Claude Review — Loop 1/3
                Found **X issue(s)**:
-               - [list each issue with filename and line]
+               - [list each issue]
                ⚙️ Auto-fixing now..."
 
-            ### FIX PHASE (immediately after review):
-
-            **Dead code / unreferenced file:**
-            - Is it in /tmp/new_files.txt? → DELETE it
-            - Is it in /tmp/existing_files.txt? → NEVER delete, add reference or test
-
-            **Missing tests:**
-            - Read existing test files for patterns
-            - Write proper test following same pattern
-            - Use real domain values from entities.py
-
-            **Placeholder values:**
-            - Read api/entities.py and domain files
-            - Replace with meaningful real values
-
-            **Bugs / security issues:**
-            - Fix code directly
-
-            After fixing ALL issues:
-            - git add .
-            - git commit -m "fix: claude loop [N] — [describe fixes]"
-            - git push
+            ## STEP 2 — FIX (if issues found):
+            - Fix ALL issues yourself
+            - Dead code in new files → delete
+            - Dead code in existing files → add reference or test
+            - Missing tests → write proper tests using domain values
+            - Placeholder values → replace with real domain values
+            - Bugs → fix directly
+            - git add . && git commit -m "fix: claude loop 1 — [fixes]" && git push
             - Post comment:
-              "## 🔧 Claude Auto-Fix — Loop [N]/3
-               Fixed:
-               - [list every fix with filename]
-               🔄 Re-reviewing..."
+              "## 🔧 Auto-Fix Applied — Loop 1/3
+               Fixed: [list fixes]
+               🔄 Loop 2 will re-review..."
+            - Write "ISSUES_FIXED" to /tmp/loop1_status.txt
 
-            ### DECISION AFTER RE-REVIEW:
+            ## IF NO ISSUES FOUND:
+            - Post comment:
+              "## ✅ All Clear after Loop 1/3 — No issues found!
+               👨‍💻 PR is ready for your approval."
+            - Write "ALL_CLEAR" to /tmp/loop1_status.txt
 
-            If zero issues AND loop any:
-            → Post FINAL SUCCESS comment and STOP
+      - name: Check Loop 1 Status
+        id: check1
+        run: |
+          STATUS=$(cat /tmp/loop1_status.txt 2>/dev/null || echo "ISSUES_FIXED")
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "Loop 1 status: $STATUS"
 
-            If issues remain AND loop < 3:
-            → Start next loop immediately
+      # ─────────────────────────────────────────
+      # LOOP 2 — Review + Fix (only if loop 1 had issues)
+      # ─────────────────────────────────────────
+      - name: Claude Loop 2 — Re-Review & Fix
+        id: loop2
+        if: steps.check1.outputs.status != 'ALL_CLEAR'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*)"
+          prompt: |
+            You are a fully autonomous code reviewer and fixer. This is LOOP 2 of 3.
+            Loop 1 already applied fixes — re-review those fixes now.
 
-            If issues remain AND loop = 3:
-            → Post FINAL WARNING comment and STOP
+            ## STRICT RULES:
+            - NEVER ask developer to fix anything
+            - NEVER delete files listed in /tmp/existing_files.txt
+            - You MAY delete files listed in /tmp/new_files.txt if problematic
+            - Write result to /tmp/loop2_status.txt → either "ISSUES_FIXED" or "ALL_CLEAR"
 
-            ---
+            ## STEP 1 — RE-REVIEW:
+            - Run: gh pr diff to get latest PR diff including loop 1 fixes
+            - Review ALL changed files again carefully
+            - Post inline comments on any remaining problem lines
+            - Post comment:
+              "## 🔍 Claude Re-Review — Loop 2/3
+               Found **X issue(s)** remaining:
+               - [list each issue]
+               ⚙️ Auto-fixing now..."
 
-            ## FINAL SUCCESS COMMENT (when zero issues):
-            "## ✅ Claude Review Complete — All Clear!
-             All issues resolved automatically in [N] loop(s).
+            ## STEP 2 — FIX (if issues found):
+            - Fix ALL remaining issues
+            - git add . && git commit -m "fix: claude loop 2 — [fixes]" && git push
+            - Post comment:
+              "## 🔧 Auto-Fix Applied — Loop 2/3
+               Fixed: [list fixes]
+               🔄 Loop 3 will re-review..."
+            - Write "ISSUES_FIXED" to /tmp/loop2_status.txt
 
-             **Summary of fixes:**
-             - [complete list of all fixes across all loops]
+            ## IF NO ISSUES FOUND:
+            - Post comment:
+              "## ✅ All Clear after Loop 2/3 — All issues resolved!
+               👨‍💻 PR is ready for your approval."
+            - Write "ALL_CLEAR" to /tmp/loop2_status.txt
 
-             **Files protected (not deleted):**
-             - [pre-existing files that were safely kept]
+      - name: Check Loop 2 Status
+        id: check2
+        if: steps.check1.outputs.status != 'ALL_CLEAR'
+        run: |
+          STATUS=$(cat /tmp/loop2_status.txt 2>/dev/null || echo "ISSUES_FIXED")
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "Loop 2 status: $STATUS"
 
-             **Files removed (new files that were problematic):**
-             - [newly added files that were deleted if any]
+      # ─────────────────────────────────────────
+      # LOOP 3 — Final Review (no more fixes after this)
+      # ─────────────────────────────────────────
+      - name: Claude Loop 3 — Final Review
+        if: |
+          steps.check1.outputs.status != 'ALL_CLEAR' &&
+          steps.check2.outputs.status != 'ALL_CLEAR'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*)"
+          prompt: |
+            You are a fully autonomous code reviewer and fixer. This is LOOP 3 of 3 — FINAL LOOP.
+            Loops 1 and 2 already applied fixes — do one final review and fix attempt.
 
-             👨‍💻 **PR is ready for your approval.
-             Please review Claude's changes and approve to merge.**"
+            ## STRICT RULES:
+            - NEVER ask developer to fix anything
+            - NEVER delete files listed in /tmp/existing_files.txt
+            - You MAY delete files listed in /tmp/new_files.txt if problematic
+            - This is the LAST loop — fix everything possible
 
-            ## FINAL WARNING COMMENT (after 3 loops, issues remain):
-            "## ⚠️ Claude Review — 3 Loops Completed
+            ## STEP 1 — FINAL REVIEW:
+            - Run: gh pr diff to get latest diff
+            - Review ALL changed files one final time
+            - Post inline comments on any remaining issues
 
-             **Auto-fixed in this session:**
-             - [list everything fixed across 3 loops]
+            ## STEP 2 — FINAL FIX (if issues found):
+            - Fix everything possible
+            - git add . && git commit -m "fix: claude loop 3 — [fixes]" && git push
 
-             **Still requires attention:**
-             - [list remaining issues with filename and line]
-             - [explain why each could not be auto-fixed]
+            ## IF ZERO ISSUES AFTER FINAL FIX:
+            - Post this comment:
+              "## ✅ Claude Review Complete — All Clear!
+               All issues resolved across 3 loops.
 
-             🔍 **These issues need developer review before merging.**"
+               **All fixes applied:**
+               - [complete list of all fixes]
+
+               👨‍💻 **PR is ready for your approval. Please review and merge.**"
+
+            ## IF ISSUES STILL REMAIN AFTER LOOP 3:
+            - Post this comment:
+              "## ⚠️ Claude Review — 3 Loops Completed
+
+               **Auto-fixed during this session:**
+               - [list everything fixed in loops 1, 2 and 3]
+
+               **Still requires attention:**
+               - [list remaining issues with filename and line number]
+               - [explain clearly why each could not be auto-fixed]
+
+               🔍 **These issues need developer review before merging.**"
