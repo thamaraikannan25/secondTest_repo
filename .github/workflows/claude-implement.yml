@@ -231,7 +231,7 @@ jobs:
           Closes #${{ github.event.issue.number }}" \
             --base main \
             --head ${{ steps.branch.outputs.branch_name }} \
-            --label "claude-reviews")
+            --label "bot-ready")
 
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
           echo "✅ PR created: $PR_URL"
