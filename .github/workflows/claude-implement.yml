@@ -11,7 +11,7 @@ jobs:
   implement:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: github.event.label.name == 'claude-implement'
+    if: github.event.label.name == 'claude-remote'
     permissions:
       contents: write
       pull-requests: write
@@ -231,7 +231,7 @@ jobs:
           Closes #${{ github.event.issue.number }}" \
             --base main \
             --head ${{ steps.branch.outputs.branch_name }} \
-            --label "claude-review")
+            --label "claude-reviews")
 
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
           echo "✅ PR created: $PR_URL"
