@@ -1,0 +1,246 @@
+name: Claude Issue Implementation
+
+on:
+  issues:
+    types: [labeled]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event.label.name == 'claude-implement'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      repository-projects: write
+
+    steps:
+      # ─────────────────────────────────────────
+      # STEP 1 — Checkout main branch
+      # ─────────────────────────────────────────
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─────────────────────────────────────────
+      # STEP 2 — Configure Git
+      # ─────────────────────────────────────────
+      - name: Configure Git
+        run: |
+          git config user.name "claude-bot"
+          git config user.email "claude-bot@users.noreply.github.com"
+
+      # ─────────────────────────────────────────
+      # STEP 3 — Move issue to In Progress
+      # ─────────────────────────────────────────
+      - name: Move Issue to In Progress
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueNumber = context.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Get project items linked to this issue
+            const query = `
+              query {
+                repository(owner: "${owner}", name: "${repo}") {
+                  issue(number: ${issueNumber}) {
+                    projectItems(first: 10) {
+                      nodes {
+                        id
+                        project {
+                          id
+                          number
+                          fields(first: 20) {
+                            nodes {
+                              ... on ProjectV2SingleSelectField {
+                                id
+                                name
+                                options {
+                                  id
+                                  name
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const result = await github.graphql(query);
+            const items = result.repository.issue.projectItems.nodes;
+
+            if (items.length === 0) {
+              console.log('Issue not linked to any project — skipping status update');
+              return;
+            }
+
+            for (const item of items) {
+              const fields = item.project.fields.nodes;
+              const statusField = fields.find(f => f.name === 'Status');
+
+              if (!statusField) continue;
+
+              const inProgressOption = statusField.options.find(
+                o => o.name.toLowerCase().includes('in progress')
+              );
+
+              if (!inProgressOption) {
+                console.log('In Progress option not found in project');
+                continue;
+              }
+
+              // Update status to In Progress
+              await github.graphql(`
+                mutation {
+                  updateProjectV2ItemFieldValue(
+                    input: {
+                      projectId: "${item.project.id}"
+                      itemId: "${item.id}"
+                      fieldId: "${statusField.id}"
+                      value: { singleSelectOptionId: "${inProgressOption.id}" }
+                    }
+                  ) {
+                    projectV2Item { id }
+                  }
+                }
+              `);
+              console.log(`✅ Issue #${issueNumber} moved to In Progress`);
+            }
+
+      # ─────────────────────────────────────────
+      # STEP 4 — Comment on issue that work started
+      # ─────────────────────────────────────────
+      - name: Post Started Comment on Issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## 🤖 Claude Implementation Started!
+
+              ✅ Issue picked up automatically
+              🔄 Status moved to **In Progress**
+              ⚙️ Creating branch and implementing code...
+
+              > This issue is being handled autonomously by Claude.`
+            });
+
+      # ─────────────────────────────────────────
+      # STEP 5 — Create feature branch
+      # ─────────────────────────────────────────
+      - name: Create Feature Branch
+        id: branch
+        run: |
+          ISSUE_NUMBER=${{ github.event.issue.number }}
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          # Clean title for branch name
+          CLEAN_TITLE=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | cut -c1-50)
+          BRANCH_NAME="claude/issue-${ISSUE_NUMBER}-${CLEAN_TITLE}"
+          echo "Creating branch: $BRANCH_NAME"
+          git checkout -b "$BRANCH_NAME"
+          git push origin "$BRANCH_NAME"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+
+      # ─────────────────────────────────────────
+      # STEP 6 — Get existing files for protection
+      # ─────────────────────────────────────────
+      - name: Get Existing Files List
+        run: |
+          git ls-tree -r main --name-only > /tmp/existing_files.txt
+          echo "=== Existing files ===" && cat /tmp/existing_files.txt
+
+      # ─────────────────────────────────────────
+      # STEP 7 — Claude implements the issue
+      # ─────────────────────────────────────────
+      - name: Claude Implement Issue
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --allowedTools "Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(gh issue view:*),Bash(gh pr create:*)"
+          prompt: |
+            You are a fully autonomous developer.
+            Implement the GitHub issue completely. No manual intervention needed.
+
+            ## STRICT RULES:
+            - NEVER modify files in /tmp/existing_files.txt unless absolutely required
+            - NEVER break existing functionality
+            - ALWAYS write tests for new code
+            - ALWAYS follow existing code style and patterns
+            - NEVER ask developer for clarification
+
+            ## STEP 1 — READ THE ISSUE:
+            - Run: gh issue view ${{ github.event.issue.number }}
+            - Understand fully what needs to be implemented
+            - Issue title: "${{ github.event.issue.title }}"
+
+            ## STEP 2 — UNDERSTAND THE CODEBASE:
+            - Read /tmp/existing_files.txt for repo structure
+            - Read relevant existing files to understand patterns
+            - Read existing tests to understand test patterns
+            - Read domain files like entities.py to understand data models
+
+            ## STEP 3 — IMPLEMENT:
+            - Create all necessary new files
+            - Modify existing files only if absolutely required
+            - Follow exact same code style as existing code
+            - Write tests for all new code
+            - Make sure implementation fully satisfies the issue
+
+            ## STEP 4 — COMMIT AND PUSH:
+            - git add .
+            - git commit -m "feat: implement issue #${{ github.event.issue.number }} — ${{ github.event.issue.title }}"
+            - git push origin ${{ steps.branch.outputs.branch_name }}
+
+            ## STEP 5 — OPEN PR:
+            - Run this exact command:
+              gh pr create \
+                --title "feat: ${{ github.event.issue.title }}" \
+                --body "## 🤖 Claude Implementation
+
+              Implements #${{ github.event.issue.number }}
+
+              ## Changes Made
+              - [list all files created]
+              - [list all files modified]
+
+              ## Tests Added
+              - [list tests written]
+
+              ## How to Test
+              - [describe how to verify the implementation]
+
+              Closes #${{ github.event.issue.number }}" \
+                --base main \
+                --head ${{ steps.branch.outputs.branch_name }} \
+                --label "claude-review"
+
+            ## STEP 6 — COMMENT ON ISSUE:
+            - Run:
+              gh issue comment ${{ github.event.issue.number }} \
+                --body "## ✅ Implementation Complete!
+
+              Code has been implemented and PR opened.
+              🔍 Claude is now reviewing the PR automatically.
+
+              Branch: \`${{ steps.branch.outputs.branch_name }}\`"
