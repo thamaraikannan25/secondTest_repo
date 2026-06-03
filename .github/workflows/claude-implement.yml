@@ -11,7 +11,7 @@ jobs:
   implement:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: github.event.label.name == 'claude-remote'
+    if: github.event.label.name == 'claude-ready'
     permissions:
       contents: write
       pull-requests: write
@@ -38,9 +38,461 @@ jobs:
           git config user.email "claude-bot@users.noreply.github.com"
 
       # ─────────────────────────────────────────
-      # STEP 3 — Move issue to In Progress
+      # STEP 3 — Eligibility Check
+      # ─────────────────────────────────────────
+      - name: Check Issue Eligibility
+        id: eligibility
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueNumber = context.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const { data: issue } = await github.rest.issues.get({
+              owner, repo, issue_number: issueNumber
+            });
+
+            // Check if it's a PR not an issue
+            if (issue.pull_request) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: `## ❌ Claude: Not Starting\n\n**Reasons:**\n- This is a Pull Request, not an Issue\n\n> No branch or code changes have been made.`
+              });
+              core.setOutput('eligible', 'false');
+              return;
+            }
+
+            // Check if issue is closed
+            if (issue.state === 'closed') {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: `## ❌ Claude: Not Starting\n\n**Reasons:**\n- Issue is closed\n\n> No branch or code changes have been made.`
+              });
+              core.setOutput('eligible', 'false');
+              return;
+            }
+
+            // Check for existing open PR
+            const { data: prs } = await github.rest.pulls.list({
+              owner, repo, state: 'open'
+            });
+            const existingPR = prs.find(pr =>
+              pr.body && pr.body.includes(`#${issueNumber}`)
+            );
+            if (existingPR) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: `## ⚠️ Claude: Not Starting — Duplicate PR\n\nAn active PR already exists: ${existingPR.html_url}\n\nPlease close or merge the existing PR before re-triggering.\n\n> No branch or code changes have been made.`
+              });
+              core.setOutput('eligible', 'false');
+              return;
+            }
+
+            // Check if issue has description
+            if (!issue.body || issue.body.trim().length < 10) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: `## ❓ Claude: Clarification Needed\n\nBefore I can start, I need clarification on:\n- Issue description is missing or too short\n- Please provide clear objective, scope, and acceptance criteria\n\n> No branch or code changes have been made.`
+              });
+              core.setOutput('eligible', 'false');
+              return;
+            }
+
+            console.log('✅ Issue is eligible');
+            core.setOutput('eligible', 'true');
+
+      # ─────────────────────────────────────────
+      # STEP 4 — Post Eligible Comment
+      # ─────────────────────────────────────────
+      - name: Post Eligible Comment
+        if: steps.eligibility.outputs.eligible == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## ✅ Claude: Eligible — Process Started
+
+              Pre-checks passed. Beginning implementation now.
+
+              **Steps:**
+              - 🌿 Creating branch
+              - 🔄 Moving to In Progress
+              - ⚙️ Implementing code
+              - ✅ Running validation
+              - 🔀 Opening PR
+              - 🔍 Moving to In Review
+
+              > This issue is being handled autonomously by Claude.`
+            });
+
+      # ─────────────────────────────────────────
+      # STEP 5 — Move Issue to In Progress
       # ─────────────────────────────────────────
       - name: Move Issue to In Progress
+        if: steps.eligibility.outputs.eligible == 'true'
+        id: in-progress
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueNumber = context.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            console.log(`🔍 Looking for issue #${issueNumber} in projects...`);
+
+            const query = `
+              query {
+                repository(owner: "${owner}", name: "${repo}") {
+                  issue(number: ${issueNumber}) {
+                    projectItems(first: 10) {
+                      nodes {
+                        id
+                        project {
+                          id
+                          number
+                          title
+                          fields(first: 20) {
+                            nodes {
+                              ... on ProjectV2SingleSelectField {
+                                id
+                                name
+                                options {
+                                  id
+                                  name
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const result = await github.graphql(query);
+            const items = result.repository.issue.projectItems.nodes;
+
+            if (items.length === 0) {
+              console.log('❌ Issue not linked to any project');
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: `## ⚠️ Claude: Project Status Update Failed\n\n- Issue is not linked to any GitHub Project board\n- Please add this issue to your project board manually\n- Implementation will continue regardless`
+              });
+              return;
+            }
+
+            for (const item of items) {
+              const fields = item.project.fields.nodes;
+              const statusField = fields.find(f => f.name === 'Status');
+              if (!statusField) {
+                console.log('❌ No Status field found');
+                continue;
+              }
+
+              console.log(`Available options: ${statusField.options.map(o => o.name).join(', ')}`);
+
+              const inProgressOption = statusField.options.find(
+                o => o.name.toLowerCase().includes('in progress')
+              );
+
+              if (!inProgressOption) {
+                console.log('❌ No In Progress option found');
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: issueNumber,
+                  body: `## ⚠️ Claude: Could Not Move to In Progress\n\n- No "In Progress" status option found in project board\n- Available options: ${statusField.options.map(o => o.name).join(', ')}\n- Please move manually or rename column to include "In Progress"`
+                });
+                continue;
+              }
+
+              await github.graphql(`
+                mutation {
+                  updateProjectV2ItemFieldValue(
+                    input: {
+                      projectId: "${item.project.id}"
+                      itemId: "${item.id}"
+                      fieldId: "${statusField.id}"
+                      value: { singleSelectOptionId: "${inProgressOption.id}" }
+                    }
+                  ) {
+                    projectV2Item { id }
+                  }
+                }
+              `);
+
+              console.log(`✅ Issue #${issueNumber} moved to In Progress`);
+
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: `## 🔄 Claude: Status Updated\n\n- ✅ Issue moved to **In Progress** on project board\n- 🌿 Creating branch and starting implementation...`
+              });
+            }
+
+      # ─────────────────────────────────────────
+      # STEP 6 — Create Feature Branch
+      # ─────────────────────────────────────────
+      - name: Create Feature Branch
+        if: steps.eligibility.outputs.eligible == 'true'
+        id: branch
+        run: |
+          ISSUE_NUMBER=${{ github.event.issue.number }}
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          CLEAN_TITLE=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | cut -c1-40)
+          BRANCH_NAME="claude-issue-${ISSUE_NUMBER}-${CLEAN_TITLE}"
+          echo "Creating branch: $BRANCH_NAME"
+
+          # Delete remote branch if already exists
+          git push origin --delete "$BRANCH_NAME" 2>/dev/null || echo "Branch doesnt exist remotely — creating fresh"
+
+          # Create fresh branch from main
+          git checkout -b "$BRANCH_NAME"
+          git push origin "$BRANCH_NAME"
+
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "✅ Branch created: $BRANCH_NAME"
+
+      # ─────────────────────────────────────────
+      # STEP 7 — Post Branch Created Comment
+      # ─────────────────────────────────────────
+      - name: Post Branch Created Comment
+        if: steps.eligibility.outputs.eligible == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## 🌿 Claude: Branch Created
+
+              - **Branch:** \`${{ steps.branch.outputs.branch_name }}\`
+              - ⚙️ Starting code implementation now...`
+            });
+
+      # ─────────────────────────────────────────
+      # STEP 8 — Get existing files for protection
+      # ─────────────────────────────────────────
+      - name: Get Existing Files List
+        if: steps.eligibility.outputs.eligible == 'true'
+        run: |
+          git ls-tree -r main --name-only > /tmp/existing_files.txt
+          echo "=== Existing files ===" && cat /tmp/existing_files.txt
+
+      # ─────────────────────────────────────────
+      # STEP 9 — Claude implements code only
+      # ─────────────────────────────────────────
+      - name: Claude Implement Code
+        if: steps.eligibility.outputs.eligible == 'true'
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --allowedTools "Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(gh issue view:*),Bash(npm run build:*),Bash(npm test:*),Bash(npm run lint:*)"
+          prompt: |
+            You are a fully autonomous developer.
+            Your ONLY job is to implement the code and run validation.
+            Do NOT create PR — handled by workflow.
+            Do NOT comment on issue — handled by workflow.
+
+            ## STRICT RULES:
+            - NEVER modify files in /tmp/existing_files.txt unless absolutely required
+            - NEVER break existing functionality
+            - Keep diff small — only changes for this issue
+            - No unrelated refactors
+            - ALWAYS write tests for new code
+            - ALWAYS follow existing code style and patterns
+            - NEVER ask for clarification
+            - NEVER create PR
+            - NEVER comment on issue
+            - STOP after commit and push
+
+            ## STEP 1 — READ THE ISSUE:
+            - Run: gh issue view ${{ github.event.issue.number }}
+            - Understand fully what needs to be implemented
+
+            ## STEP 2 — UNDERSTAND CODEBASE:
+            - Read /tmp/existing_files.txt for repo structure
+            - Read relevant existing files for patterns
+            - Read existing tests for test patterns
+            - Read domain files for data models
+
+            ## STEP 3 — IMPLEMENT:
+            - Create all necessary new files
+            - Modify existing files only if absolutely required
+            - Write tests for all new code
+            - Follow exact same code style
+
+            ## STEP 4 — VALIDATE:
+            - Run: npm run build (for UI/React changes)
+            - Run: npm test (for all changes)
+            - Write results to /tmp/validation_result.txt:
+              BUILD_STATUS=pass or fail
+              TEST_STATUS=pass or fail
+              BUILD_OUTPUT=<one line summary>
+              TEST_OUTPUT=<one line summary>
+            - If validation fails → attempt fix → re-run
+            - Write final status regardless of outcome
+
+            ## STEP 5 — COMMIT AND PUSH:
+            - git add .
+            - git commit -m "feat: implement issue #${{ github.event.issue.number }} — ${{ github.event.issue.title }}"
+            - git push origin ${{ steps.branch.outputs.branch_name }}
+            - STOP — do not do anything else
+
+      # ─────────────────────────────────────────
+      # STEP 10 — Post Implementation Comment
+      # ─────────────────────────────────────────
+      - name: Post Implementation Complete Comment
+        if: steps.eligibility.outputs.eligible == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## ⚙️ Claude: Code Implementation Complete
+
+              - ✅ Code implemented successfully
+              - ✅ Tests written
+              - ✅ Validation run
+              - 🔀 Creating PR now...`
+            });
+
+      # ─────────────────────────────────────────
+      # STEP 11 — Create PR (guaranteed)
+      # ─────────────────────────────────────────
+      - name: Create Pull Request
+        if: steps.eligibility.outputs.eligible == 'true'
+        id: create-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BUILD_STATUS=$(grep 'BUILD_STATUS' /tmp/validation_result.txt 2>/dev/null | cut -d= -f2 || echo "not run")
+          TEST_STATUS=$(grep 'TEST_STATUS' /tmp/validation_result.txt 2>/dev/null | cut -d= -f2 || echo "not run")
+          BUILD_OUTPUT=$(grep 'BUILD_OUTPUT' /tmp/validation_result.txt 2>/dev/null | cut -d= -f2 || echo "N/A")
+          TEST_OUTPUT=$(grep 'TEST_OUTPUT' /tmp/validation_result.txt 2>/dev/null | cut -d= -f2 || echo "N/A")
+
+          PR_URL=$(gh pr create \
+            --title "[Claude - Issue #${{ github.event.issue.number }}] ${{ github.event.issue.title }}" \
+            --body "## 🤖 Claude Implementation
+
+          Fixes #${{ github.event.issue.number }}
+
+          ## Summary
+          Automatically implemented by Claude AI based on issue requirements.
+
+          ## Test Plan
+          - Review changed files
+          - Run existing test suite
+          - Verify acceptance criteria from issue
+
+          ## Validation Result
+          ### Build Status
+          ${BUILD_STATUS} — ${BUILD_OUTPUT}
+
+          ### Test Status
+          ${TEST_STATUS} — ${TEST_OUTPUT}
+
+          ## Known Limitations / Follow-ups
+          None identified — please review and flag if any." \
+            --base main \
+            --head ${{ steps.branch.outputs.branch_name }} \
+            --label "claude-review")
+
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "✅ PR created: $PR_URL"
+
+      # ─────────────────────────────────────────
+      # STEP 12 — Verify claude-review label
+      # ─────────────────────────────────────────
+      - name: Verify claude-review Label on PR
+        if: steps.eligibility.outputs.eligible == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prUrl = '${{ steps.create-pr.outputs.pr_url }}';
+            const prNumber = prUrl.split('/').pop();
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: parseInt(prNumber)
+            });
+
+            const hasLabel = pr.labels.some(l => l.name === 'claude-review');
+
+            if (!hasLabel) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: 'claude-review' });
+              } catch {
+                await github.rest.issues.createLabel({
+                  owner, repo, name: 'claude-review', color: '0075ca'
+                });
+              }
+              try {
+                await github.rest.issues.addLabels({
+                  owner, repo,
+                  issue_number: parseInt(prNumber),
+                  labels: ['claude-review']
+                });
+                console.log('✅ claude-review label applied');
+              } catch {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: parseInt(prNumber),
+                  body: `claude-review: Label could not be applied automatically — please manually add 'claude-review' to this PR`
+                });
+              }
+            } else {
+              console.log('✅ claude-review label already present');
+            }
+
+      # ─────────────────────────────────────────
+      # STEP 13 — Add claude-done label to issue
+      # ─────────────────────────────────────────
+      - name: Add claude-done Label to Issue
+        if: steps.eligibility.outputs.eligible == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: 'claude-done' });
+            } catch {
+              await github.rest.issues.createLabel({
+                owner, repo, name: 'claude-done', color: '0e8a16'
+              });
+            }
+
+            await github.rest.issues.addLabels({
+              owner, repo,
+              issue_number: context.issue.number,
+              labels: ['claude-done']
+            });
+            console.log('✅ claude-done label added');
+
+      # ─────────────────────────────────────────
+      # STEP 14 — Move Issue to In Review
+      # ─────────────────────────────────────────
+      - name: Move Issue to In Review
+        if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -58,7 +510,6 @@ jobs:
                         id
                         project {
                           id
-                          number
                           fields(first: 20) {
                             nodes {
                               ... on ProjectV2SingleSelectField {
@@ -92,10 +543,18 @@ jobs:
               const statusField = fields.find(f => f.name === 'Status');
               if (!statusField) continue;
 
-              const inProgressOption = statusField.options.find(
-                o => o.name.toLowerCase().includes('in progress')
+              const inReviewOption = statusField.options.find(
+                o => o.name.toLowerCase().includes('in review') ||
+                     o.name.toLowerCase().includes('review')
               );
-              if (!inProgressOption) continue;
+
+              if (!inReviewOption) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: issueNumber,
+                  body: `## ⚠️ Claude: Could Not Move to In Review\n\n- No "In Review" status option found\n- Available options: ${statusField.options.map(o => o.name).join(', ')}\n- Please move manually`
+                });
+                continue;
+              }
 
               await github.graphql(`
                 mutation {
@@ -104,20 +563,21 @@ jobs:
                       projectId: "${item.project.id}"
                       itemId: "${item.id}"
                       fieldId: "${statusField.id}"
-                      value: { singleSelectOptionId: "${inProgressOption.id}" }
+                      value: { singleSelectOptionId: "${inReviewOption.id}" }
                     }
                   ) {
                     projectV2Item { id }
                   }
                 }
               `);
-              console.log(`✅ Issue #${issueNumber} moved to In Progress`);
+              console.log(`✅ Issue #${issueNumber} moved to In Review`);
             }
 
       # ─────────────────────────────────────────
-      # STEP 4 — Post started comment
+      # STEP 15 — Post Final Success Comment
       # ─────────────────────────────────────────
-      - name: Post Started Comment on Issue
+      - name: Post Final Success Comment
+        if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -126,120 +586,30 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `## 🤖 Claude Implementation Started!
-              
-              ✅ Issue picked up automatically
-              🔄 Status moved to **In Progress**
-              ⚙️ Creating branch and implementing code...
-              
-              > This issue is being handled autonomously by Claude.`
+              body: `## ✅ Claude: Implementation Complete
+
+              **PR:** ${{ steps.create-pr.outputs.pr_url }}
+              **Branch:** \`${{ steps.branch.outputs.branch_name }}\`
+              **Status:** Moved to **In Review** 🔍
+
+              ## Summary
+              - ✅ Eligibility checked and passed
+              - ✅ Issue moved to In Progress
+              - ✅ Branch created
+              - ✅ Code implemented
+              - ✅ Tests written
+              - ✅ Validation run
+              - ✅ PR created with claude-review label
+              - ✅ Issue moved to In Review
+
+              👨‍💻 **Please review the PR and approve to merge.**`
             });
 
       # ─────────────────────────────────────────
-      # STEP 5 — Create feature branch
+      # STEP 16 — Post Failure Comment (if any step fails)
       # ─────────────────────────────────────────
-      - name: Create Feature Branch
-        id: branch
-        run: |
-          ISSUE_NUMBER=${{ github.event.issue.number }}
-          ISSUE_TITLE="${{ github.event.issue.title }}"
-          CLEAN_TITLE=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | cut -c1-50)
-          BRANCH_NAME="claude/issue-${ISSUE_NUMBER}-${CLEAN_TITLE}"
-          echo "Creating branch: $BRANCH_NAME"
-          git checkout -b "$BRANCH_NAME"
-          git push origin "$BRANCH_NAME"
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
-
-      # ─────────────────────────────────────────
-      # STEP 6 — Get existing files for protection
-      # ─────────────────────────────────────────
-      - name: Get Existing Files List
-        run: |
-          git ls-tree -r main --name-only > /tmp/existing_files.txt
-          echo "=== Existing files ===" && cat /tmp/existing_files.txt
-
-      # ─────────────────────────────────────────
-      # STEP 7 — Claude implements the issue only
-      # ─────────────────────────────────────────
-      - name: Claude Implement Issue
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: >-
-            --model claude-sonnet-4-6
-            --allowedTools "Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(gh issue view:*)"
-          prompt: |
-            You are a fully autonomous developer.
-            Your ONLY job here is to implement the code — do NOT create PR or comment on issue.
-            PR creation is handled separately by the workflow.
-
-            ## STRICT RULES:
-            - NEVER modify files in /tmp/existing_files.txt unless absolutely required
-            - NEVER break existing functionality
-            - ALWAYS write tests for new code
-            - ALWAYS follow existing code style and patterns
-            - NEVER ask developer for clarification
-            - NEVER run gh pr create — PR is created by next step
-            - NEVER comment on the issue — handled by next step
-
-            ## STEP 1 — READ THE ISSUE:
-            - Run: gh issue view ${{ github.event.issue.number }}
-            - Understand fully what needs to be implemented
-            - Issue title: "${{ github.event.issue.title }}"
-
-            ## STEP 2 — UNDERSTAND THE CODEBASE:
-            - Read /tmp/existing_files.txt for repo structure
-            - Read relevant existing files to understand patterns
-            - Read existing tests to understand test patterns
-            - Read domain files to understand data models
-
-            ## STEP 3 — IMPLEMENT:
-            - Create all necessary new files
-            - Modify existing files only if absolutely required
-            - Follow exact same code style as existing code
-            - Write tests for all new code
-            - Make sure implementation fully satisfies the issue
-
-            ## STEP 4 — COMMIT AND PUSH:
-            - git add .
-            - git commit -m "feat: implement issue #${{ github.event.issue.number }} — ${{ github.event.issue.title }}"
-            - git push origin ${{ steps.branch.outputs.branch_name }}
-            - STOP HERE — do not do anything else
-
-      # ─────────────────────────────────────────
-      # STEP 8 — Create PR (guaranteed to run)   ← KEY FIX
-      # ─────────────────────────────────────────
-      - name: Create Pull Request
-        id: create-pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR_URL=$(gh pr create \
-            --title "feat: ${{ github.event.issue.title }}" \
-            --body "## 🤖 Claude Implementation
-
-          Implements #${{ github.event.issue.number }}
-
-          ## Changes Made
-          Automatically implemented by Claude AI.
-
-          ## How to Test
-          Please review the changes and run existing tests.
-
-          Closes #${{ github.event.issue.number }}" \
-            --base main \
-            --head ${{ steps.branch.outputs.branch_name }} \
-            --label "bot-ready")
-
-          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
-          echo "✅ PR created: $PR_URL"
-
-      # ─────────────────────────────────────────
-      # STEP 9 — Comment on issue with PR link
-      # ─────────────────────────────────────────
-      - name: Post Completion Comment on Issue
+      - name: Post Failure Comment
+        if: failure()
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -248,11 +618,19 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `## ✅ Implementation Complete!
+              body: `## ❌ Claude: Workflow Failed
 
-              Code has been implemented and PR opened automatically.
-              🔍 Claude is now reviewing the PR.
+              The automated implementation workflow encountered an error.
 
-              🔗 PR: ${{ steps.create-pr.outputs.pr_url }}
-              🌿 Branch: \`${{ steps.branch.outputs.branch_name }}\``
+              **What was completed before failure:**
+              - Eligibility Check: ${{ steps.eligibility.outputs.eligible == 'true' && '✅' || '❌' }}
+              - Branch Created: ${{ steps.branch.outputs.branch_name != '' && '✅' || '❌' }}
+              - PR Created: ${{ steps.create-pr.outputs.pr_url != '' && '✅' || '❌' }}
+
+              **What to do:**
+              - Check the [Actions log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the exact error
+              - Fix the issue and re-add \`claude-ready\` label to retry
+
+              **Direct link to failed run:**
+              ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
             });
