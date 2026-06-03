@@ -11,7 +11,7 @@ jobs:
   implement:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: github.event.label.name == 'claude-remote'
+    if: github.event.label.name == 'claude-implement'
     permissions:
       contents: write
       pull-requests: write
@@ -49,7 +49,6 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
-            // Get project items linked to this issue
             const query = `
               query {
                 repository(owner: "${owner}", name: "${repo}") {
@@ -84,26 +83,20 @@ jobs:
             const items = result.repository.issue.projectItems.nodes;
 
             if (items.length === 0) {
-              console.log('Issue not linked to any project — skipping status update');
+              console.log('Issue not linked to any project — skipping');
               return;
             }
 
             for (const item of items) {
               const fields = item.project.fields.nodes;
               const statusField = fields.find(f => f.name === 'Status');
-
               if (!statusField) continue;
 
               const inProgressOption = statusField.options.find(
                 o => o.name.toLowerCase().includes('in progress')
               );
+              if (!inProgressOption) continue;
 
-              if (!inProgressOption) {
-                console.log('In Progress option not found in project');
-                continue;
-              }
-
-              // Update status to In Progress
               await github.graphql(`
                 mutation {
                   updateProjectV2ItemFieldValue(
@@ -122,7 +115,7 @@ jobs:
             }
 
       # ─────────────────────────────────────────
-      # STEP 4 — Comment on issue that work started
+      # STEP 4 — Post started comment
       # ─────────────────────────────────────────
       - name: Post Started Comment on Issue
         uses: actions/github-script@v7
@@ -134,11 +127,11 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: `## 🤖 Claude Implementation Started!
-
+              
               ✅ Issue picked up automatically
               🔄 Status moved to **In Progress**
               ⚙️ Creating branch and implementing code...
-
+              
               > This issue is being handled autonomously by Claude.`
             });
 
@@ -150,7 +143,6 @@ jobs:
         run: |
           ISSUE_NUMBER=${{ github.event.issue.number }}
           ISSUE_TITLE="${{ github.event.issue.title }}"
-          # Clean title for branch name
           CLEAN_TITLE=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | cut -c1-50)
           BRANCH_NAME="claude/issue-${ISSUE_NUMBER}-${CLEAN_TITLE}"
           echo "Creating branch: $BRANCH_NAME"
@@ -168,7 +160,7 @@ jobs:
           echo "=== Existing files ===" && cat /tmp/existing_files.txt
 
       # ─────────────────────────────────────────
-      # STEP 7 — Claude implements the issue
+      # STEP 7 — Claude implements the issue only
       # ─────────────────────────────────────────
       - name: Claude Implement Issue
         uses: anthropics/claude-code-action@v1
@@ -177,10 +169,11 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: >-
             --model claude-sonnet-4-6
-            --allowedTools "Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(gh issue view:*),Bash(gh pr create:*)"
+            --allowedTools "Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(gh issue view:*)"
           prompt: |
             You are a fully autonomous developer.
-            Implement the GitHub issue completely. No manual intervention needed.
+            Your ONLY job here is to implement the code — do NOT create PR or comment on issue.
+            PR creation is handled separately by the workflow.
 
             ## STRICT RULES:
             - NEVER modify files in /tmp/existing_files.txt unless absolutely required
@@ -188,6 +181,8 @@ jobs:
             - ALWAYS write tests for new code
             - ALWAYS follow existing code style and patterns
             - NEVER ask developer for clarification
+            - NEVER run gh pr create — PR is created by next step
+            - NEVER comment on the issue — handled by next step
 
             ## STEP 1 — READ THE ISSUE:
             - Run: gh issue view ${{ github.event.issue.number }}
@@ -198,7 +193,7 @@ jobs:
             - Read /tmp/existing_files.txt for repo structure
             - Read relevant existing files to understand patterns
             - Read existing tests to understand test patterns
-            - Read domain files like entities.py to understand data models
+            - Read domain files to understand data models
 
             ## STEP 3 — IMPLEMENT:
             - Create all necessary new files
@@ -211,36 +206,53 @@ jobs:
             - git add .
             - git commit -m "feat: implement issue #${{ github.event.issue.number }} — ${{ github.event.issue.title }}"
             - git push origin ${{ steps.branch.outputs.branch_name }}
+            - STOP HERE — do not do anything else
 
-            ## STEP 5 — OPEN PR:
-            - Run this exact command:
-              gh pr create \
-                --title "feat: ${{ github.event.issue.title }}" \
-                --body "## 🤖 Claude Implementation
+      # ─────────────────────────────────────────
+      # STEP 8 — Create PR (guaranteed to run)   ← KEY FIX
+      # ─────────────────────────────────────────
+      - name: Create Pull Request
+        id: create-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL=$(gh pr create \
+            --title "feat: ${{ github.event.issue.title }}" \
+            --body "## 🤖 Claude Implementation
 
-              Implements #${{ github.event.issue.number }}
+          Implements #${{ github.event.issue.number }}
 
-              ## Changes Made
-              - [list all files created]
-              - [list all files modified]
+          ## Changes Made
+          Automatically implemented by Claude AI.
 
-              ## Tests Added
-              - [list tests written]
+          ## How to Test
+          Please review the changes and run existing tests.
 
-              ## How to Test
-              - [describe how to verify the implementation]
+          Closes #${{ github.event.issue.number }}" \
+            --base main \
+            --head ${{ steps.branch.outputs.branch_name }} \
+            --label "claude-review")
 
-              Closes #${{ github.event.issue.number }}" \
-                --base main \
-                --head ${{ steps.branch.outputs.branch_name }} \
-                --label "claude-review"
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "✅ PR created: $PR_URL"
 
-            ## STEP 6 — COMMENT ON ISSUE:
-            - Run:
-              gh issue comment ${{ github.event.issue.number }} \
-                --body "## ✅ Implementation Complete!
+      # ─────────────────────────────────────────
+      # STEP 9 — Comment on issue with PR link
+      # ─────────────────────────────────────────
+      - name: Post Completion Comment on Issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## ✅ Implementation Complete!
 
-              Code has been implemented and PR opened.
-              🔍 Claude is now reviewing the PR automatically.
+              Code has been implemented and PR opened automatically.
+              🔍 Claude is now reviewing the PR.
 
-              Branch: \`${{ steps.branch.outputs.branch_name }}\`"
+              🔗 PR: ${{ steps.create-pr.outputs.pr_url }}
+              🌿 Branch: \`${{ steps.branch.outputs.branch_name }}\``
+            });
