@@ -11,7 +11,7 @@ jobs:
   implement:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: github.event.label.name == 'claude-implement'
+    if: github.event.label.name == 'claude-remote'
     permissions:
       contents: write
       pull-requests: write
