@@ -10,7 +10,7 @@ env:
 jobs:
   implement:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60                    # ← increased from 20
     if: github.event.label.name == 'claude-ready'
     permissions:
       contents: write
@@ -24,6 +24,7 @@ jobs:
       # STEP 1 — Checkout main branch
       # ─────────────────────────────────────────
       - name: Checkout main branch
+        id: checkout                       # ← added id
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -33,6 +34,7 @@ jobs:
       # STEP 2 — Configure Git
       # ─────────────────────────────────────────
       - name: Configure Git
+        id: configure-git                  # ← added id
         run: |
           git config user.name "claude-bot"
           git config user.email "claude-bot@users.noreply.github.com"
@@ -54,7 +56,6 @@ jobs:
               owner, repo, issue_number: issueNumber
             });
 
-            // Check if it's a PR not an issue
             if (issue.pull_request) {
               await github.rest.issues.createComment({
                 owner, repo, issue_number: issueNumber,
@@ -64,7 +65,6 @@ jobs:
               return;
             }
 
-            // Check if issue is closed
             if (issue.state === 'closed') {
               await github.rest.issues.createComment({
                 owner, repo, issue_number: issueNumber,
@@ -74,7 +74,6 @@ jobs:
               return;
             }
 
-            // Check for existing open PR
             const { data: prs } = await github.rest.pulls.list({
               owner, repo, state: 'open'
             });
@@ -94,7 +93,6 @@ jobs:
               return;
             }
 
-            // Check if issue has clear description
             if (!issue.body || issue.body.trim().length < 10) {
               await github.rest.issues.createComment({
                 owner, repo, issue_number: issueNumber,
@@ -111,6 +109,7 @@ jobs:
       # STEP 4 — Post Eligible Comment
       # ─────────────────────────────────────────
       - name: Post Eligible Comment
+        id: post-eligible                  # ← added id
         if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/github-script@v7
         with:
@@ -128,8 +127,8 @@ jobs:
               - 🔄 Moving to In Progress
               - 🌿 Creating branch
               - ⚙️ Implementing code
-              - ✅ Running validation
-              - 🔀 Opening PR
+              - ✅ Running build + test validation
+              - 🔀 Opening PR with validation proof
               - 🔍 Moving to In Review
 
               > This issue is being handled autonomously by Claude.`
@@ -141,6 +140,7 @@ jobs:
       - name: Move Issue to In Progress
         if: steps.eligibility.outputs.eligible == 'true'
         id: in-progress
+        continue-on-error: true            # ← board update should not fail workflow
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -214,15 +214,12 @@ jobs:
                 continue;
               }
 
-              // Get current status
               const currentStatusValue = item.fieldValues.nodes.find(
                 v => v.field && v.field.name === 'Status'
               );
               const currentStatus = currentStatusValue?.name?.toLowerCase() || '';
               console.log(`Current status: ${currentStatus}`);
 
-              // Only move from Backlog → In Progress
-              // Do NOT move backward if already In Progress or later
               const laterStatuses = ['in progress', 'in review', 'done', 'complete', 'merged'];
               const isAlreadyLater = laterStatuses.some(s => currentStatus.includes(s));
 
@@ -241,7 +238,7 @@ jobs:
                 console.log('❌ No In Progress option found');
                 await github.rest.issues.createComment({
                   owner, repo, issue_number: issueNumber,
-                  body: `## ⚠️ Claude: Could Not Move to In Progress\n\n- No "In Progress" status option found in project board\n- Available options: ${statusField.options.map(o => o.name).join(', ')}\n- Please move manually or rename column to include "In Progress"`
+                  body: `## ⚠️ Claude: Could Not Move to In Progress\n\n- No "In Progress" status option found in project board\n- Available options: ${statusField.options.map(o => o.name).join(', ')}\n- Please move manually\n- Implementation will continue regardless`
                 });
                 continue;
               }
@@ -281,10 +278,7 @@ jobs:
           BRANCH_NAME="claude-issue-${ISSUE_NUMBER}-${CLEAN_TITLE}"
           echo "Creating branch: $BRANCH_NAME"
 
-          # Delete remote branch if already exists from previous run
           git push origin --delete "$BRANCH_NAME" 2>/dev/null || echo "Branch doesnt exist remotely — creating fresh"
-
-          # Create fresh branch from main
           git checkout -b "$BRANCH_NAME"
           git push origin "$BRANCH_NAME"
 
@@ -295,6 +289,7 @@ jobs:
       # STEP 7 — Post Branch Created Comment
       # ─────────────────────────────────────────
       - name: Post Branch Created Comment
+        id: post-branch                    # ← added id
         if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/github-script@v7
         with:
@@ -314,13 +309,14 @@ jobs:
       # STEP 8 — Get existing files for protection
       # ─────────────────────────────────────────
       - name: Get Existing Files List
+        id: existing-files                 # ← added id
         if: steps.eligibility.outputs.eligible == 'true'
         run: |
           git ls-tree -r main --name-only > /tmp/existing_files.txt
           echo "=== Existing files ===" && cat /tmp/existing_files.txt
 
       # ─────────────────────────────────────────
-      # STEP 9 — Claude implements code + writes summary
+      # STEP 9 — Claude implements + validates + creates PR
       # ─────────────────────────────────────────
       - name: Claude Implement Code
         if: steps.eligibility.outputs.eligible == 'true'
@@ -331,90 +327,188 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: >-
             --model claude-sonnet-4-6
-            --allowedTools "Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(gh issue view:*),Bash(npm run build:*),Bash(npm test:*),Bash(npm run lint:*),Bash(npm run coverage:*)"
+            --allowedTools "Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh pr create:*),Bash(gh pr view:*),Bash(gh pr edit:*),Bash(gh pr comment:*),Bash(gh label create:*),Bash(gh label list:*),Bash(npm run build:*),Bash(npm test:*),Bash(npm run test:*),Bash(npm run coverage:*),Bash(npm run lint:*)"
           prompt: |
-            You are a fully autonomous developer.
-            Your ONLY job is to implement the code, run validation and write summary.
-            Do NOT create PR — handled by workflow.
-            Do NOT comment on issue — handled by workflow.
+            You are a fully autonomous developer on issue #${{ github.event.issue.number }}.
+            Branch already created: ${{ steps.branch.outputs.branch_name }}
+            You are already on this branch — do NOT create another branch.
             Do NOT move project status — handled by workflow.
+            Do NOT add claude-done label — handled by workflow.
 
-            ## STRICT RULES:
-            - NEVER modify files in /tmp/existing_files.txt unless absolutely required
-            - NEVER break existing functionality
-            - Keep diff small — only changes for this issue
-            - No unrelated refactors
-            - ALWAYS write tests for new code
-            - ALWAYS follow existing code style and patterns
-            - NEVER ask for clarification
-            - NEVER create PR
-            - NEVER comment on issue
-            - STOP after writing summary and pushing
+            ## BLOCKER RULE (HIGHEST PRIORITY):
+            If blocked at ANY point (permissions, missing config, integration errors):
+            - Do NOT hack around it
+            - Do NOT guess
+            - Post exact blocker on issue:
+              gh issue comment ${{ github.event.issue.number }} \
+                --body "## 🚫 Claude: Blocked
+                **Blocked at:** [step name]
+                **Exact error:** [full error message]
+                **Why cannot auto-resolve:** [reason]
+                **What is needed:** [exact action to unblock]"
+            - Write BLOCKED=true to /tmp/pr_summary.txt
+            - STOP immediately
 
-            ## STEP 1 — READ THE ISSUE:
+            ---
+
+            ## STEP 1 — READ ISSUE:
             - Run: gh issue view ${{ github.event.issue.number }}
             - Read title: "${{ github.event.issue.title }}"
             - Understand fully: objective, scope, acceptance criteria
+            - If still unclear after reading → post clarification comment → STOP
 
             ## STEP 2 — UNDERSTAND CODEBASE:
-            - Read /tmp/existing_files.txt for repo structure
+            - Read /tmp/existing_files.txt for full repo structure
             - Read relevant existing files for patterns and conventions
-            - Read existing tests for test patterns
-            - Read domain files for data models
+            - Read existing tests to understand test patterns
+            - Run: cat package.json to check available scripts
+            - Read domain files to understand data models
             - Match existing code style exactly
 
             ## STEP 3 — IMPLEMENT:
-            - Create all necessary new files
-            - Modify existing files only if absolutely required
-            - Write tests for all new code
-            - Follow exact same code style
-            - Keep diff small — only this issue
+            - NEVER modify files in /tmp/existing_files.txt unless absolutely required
+            - NEVER break existing functionality
+            - Keep diff small — only this issue, no unrelated refactors
+            - Write tests for all new code or modified behavior
+            - Follow exact same code style and conventions
+            - If blocked at any point → follow BLOCKER RULE above
 
-            ## STEP 4 — VALIDATE:
+            ## STEP 4 — VALIDATE (MANDATORY — per routine instructions):
+            First check available scripts:
+            Run: cat package.json | grep -A 20 '"scripts"'
 
             ### For React/UI changes:
             - Run: npm run build
-            - Capture FULL output
+            - Capture FULL output — do not truncate
+            - If build fails → attempt fix → re-run
+            - Record: pass / fail / not_configured
 
-            ### For test coverage:
-            - Run: npm run coverage OR npm test -- --coverage
-            - Capture before → after coverage numbers
+            ### For test coverage (UI or API):
+            - Run: npm test -- --watchAll=false --coverage
+            - Capture FULL output including pass/fail counts
+            - Capture coverage percentage before → after
+            - If tests fail → attempt fix → re-run
+            - Record: pass / fail / not_configured
 
-            ### For all changes:
-            - Run: npm test
-            - Capture pass/fail counts
+            ### If scripts do NOT exist:
+            - Record: not_configured
+            - Note exactly which script is missing
 
-            ### If validation fails:
+            ### If validation FAILS after fix attempt:
             - Do NOT hide failure
-            - Attempt to fix and re-run
-            - If still failing → record failure details
+            - Record exact failure logs
+            - Record probable cause
+            - Record next-step fix plan
+            - Include all failure details in PR body
 
-            ## STEP 5 — WRITE SUMMARY FILE (MANDATORY):
-            Write to /tmp/pr_summary.txt in EXACT format:
-
-            IMPLEMENTATION_SUMMARY=<one paragraph what was implemented>
-            FILES_CREATED=<comma separated list>
-            FILES_MODIFIED=<comma separated list>
-            TESTS_WRITTEN=<comma separated list>
-            BUILD_STATUS=<pass or fail or not_run>
-            BUILD_OUTPUT=<full build output one line>
-            TEST_STATUS=<pass or fail or not_run>
-            TEST_OUTPUT=<test results with pass/fail counts one line>
-            COVERAGE_BEFORE=<percentage or N/A>
-            COVERAGE_AFTER=<percentage or N/A>
-            KNOWN_LIMITATIONS=<limitations or none>
-            RISKS=<risks or none>
-
-            ## STEP 6 — COMMIT AND PUSH:
+            ## STEP 5 — COMMIT AND PUSH:
             - git add .
             - git commit -m "feat: implement issue #${{ github.event.issue.number }} — ${{ github.event.issue.title }}"
             - git push origin ${{ steps.branch.outputs.branch_name }}
-            - STOP — do not do anything else
+
+            ## STEP 6 — CREATE PR (per routine instructions):
+            gh pr create \
+              --title "[Claude - Issue #${{ github.event.issue.number }}] ${{ github.event.issue.title }}" \
+              --base main \
+              --head ${{ steps.branch.outputs.branch_name }} \
+              --label "claude-review" \
+              --body "## 🤖 Claude Implementation
+
+            Fixes #${{ github.event.issue.number }}
+
+            ## Summary
+            [Detailed description of what was implemented]
+
+            ## Changes Made
+            **Files Created:** [list each file]
+            **Files Modified:** [list each file]
+            **Tests Written:** [list each test file]
+
+            ## Test Plan
+            - Review changed files listed above
+            - Run existing test suite
+            - Verify acceptance criteria from issue #${{ github.event.issue.number }}
+
+            ## Validation Result
+            ### Build Status
+            [✅ pass / ❌ fail / ⏭️ not_configured] — [full build output summary]
+
+            ### Test Status
+            [✅ pass / ❌ fail / ⏭️ not_configured] — [full test results with counts]
+
+            ### Coverage
+            Before: [X%] → After: [Y%]
+
+            ## Known Limitations / Follow-ups
+            [List or none]
+
+            ## Risks / Open Questions
+            [List or none]"
+
+            ## STEP 7 — VERIFY claude-review LABEL ON PR:
+            - Run: gh pr view --json labels
+            - If label missing:
+              - Run: gh label list | grep claude-review
+              - If not exists: gh label create "claude-review" --color "0075ca" --description "PR ready for Claude review"
+              - Run: gh pr edit --add-label "claude-review"
+              - If still fails → add PR comment:
+                "claude-review: Label could not be applied automatically —
+                 please manually add 'claude-review' to this PR"
+
+            ## STEP 8 — ATTACH VALIDATION EVIDENCE TO PR (MANDATORY — per routine instructions):
+            Post PR comment with FULL validation proof:
+            gh pr comment --body "## 🔍 Claude: Validation Evidence
+
+            ### Build Result
+            [✅/❌/⏭️] **[build_status]**
+            \`\`\`
+            [FULL build output — do not truncate]
+            \`\`\`
+
+            ### Test Result
+            [✅/❌/⏭️] **[test_status]**
+            \`\`\`
+            [FULL test output with pass/fail counts — do not truncate]
+            \`\`\`
+
+            ### Coverage Summary
+            Before: [X%] → After: [Y%]
+
+            > Evidence automatically attached by Claude bot"
+
+            ## STEP 9 — WRITE SUMMARY FILE (MANDATORY):
+            Write ALL fields to /tmp/pr_summary.txt in EXACT format:
+
+            BLOCKED=false
+            IMPLEMENTATION_SUMMARY=[one paragraph what was implemented]
+            FILES_CREATED=[comma separated list]
+            FILES_MODIFIED=[comma separated list]
+            TESTS_WRITTEN=[comma separated list]
+            BUILD_STATUS=[pass/fail/not_configured]
+            BUILD_OUTPUT=[one line summary]
+            TEST_STATUS=[pass/fail/not_configured]
+            TEST_OUTPUT=[one line with pass/fail counts]
+            COVERAGE_BEFORE=[percentage or N/A]
+            COVERAGE_AFTER=[percentage or N/A]
+            PR_URL=[full pr url]
+            KNOWN_LIMITATIONS=[or none]
+            RISKS=[or none]
+
+            ## SAFETY RULES:
+            - NEVER force push to protected branches
+            - NEVER auto-merge
+            - NEVER auto-close issues
+            - NEVER auto-delete branches
+            - NEVER add claude-done label — workflow handles it
+            - NEVER move project status — workflow handles it
+            - If uncertain about a fix → comment instead of guessing
+            - Log every action taken
 
       # ─────────────────────────────────────────
       # STEP 10 — Post Implementation Comment
       # ─────────────────────────────────────────
       - name: Post Implementation Complete Comment
+        id: post-implementation            # ← added id
         if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/github-script@v7
         with:
@@ -428,86 +522,96 @@ jobs:
 
               - ✅ Code implemented
               - ✅ Tests written
-              - ✅ Validation run
-              - 🔀 Creating PR now...`
+              - ✅ Build + test validation run
+              - ✅ Validation evidence attached to PR
+              - 🔀 PR created — checking labels...`
             });
 
       # ─────────────────────────────────────────
-      # STEP 11 — Create PR with full details
+      # STEP 11 — Fallback PR if Claude skipped
       # ─────────────────────────────────────────
-      - name: Create Pull Request
+      - name: Fallback PR Creation
         if: steps.eligibility.outputs.eligible == 'true'
         id: create-pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          IMPL_SUMMARY=$(grep '^IMPLEMENTATION_SUMMARY=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "Automatically implemented by Claude AI")
-          FILES_CREATED=$(grep '^FILES_CREATED=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "See diff")
-          FILES_MODIFIED=$(grep '^FILES_MODIFIED=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "See diff")
-          TESTS_WRITTEN=$(grep '^TESTS_WRITTEN=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "See diff")
-          BUILD_STATUS=$(grep '^BUILD_STATUS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "not_run")
-          BUILD_OUTPUT=$(grep '^BUILD_OUTPUT=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-          TEST_STATUS=$(grep '^TEST_STATUS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "not_run")
-          TEST_OUTPUT=$(grep '^TEST_OUTPUT=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-          COVERAGE_BEFORE=$(grep '^COVERAGE_BEFORE=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-          COVERAGE_AFTER=$(grep '^COVERAGE_AFTER=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-          KNOWN_LIMITATIONS=$(grep '^KNOWN_LIMITATIONS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "None identified")
-          RISKS=$(grep '^RISKS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "None identified")
-
-          BUILD_EMOJI=$([ "$BUILD_STATUS" = "pass" ] && echo "✅" || [ "$BUILD_STATUS" = "not_run" ] && echo "⏭️" || echo "❌")
-          TEST_EMOJI=$([ "$TEST_STATUS" = "pass" ] && echo "✅" || [ "$TEST_STATUS" = "not_run" ] && echo "⏭️" || echo "❌")
-
-          PR_URL=$(gh pr create \
-            --title "[Claude - Issue #${{ github.event.issue.number }}] ${{ github.event.issue.title }}" \
-            --body "## 🤖 Claude Implementation
-
-          Fixes #${{ github.event.issue.number }}
-
-          ## Summary
-          ${IMPL_SUMMARY}
-
-          ## Changes Made
-          **Files Created:**
-          ${FILES_CREATED}
-
-          **Files Modified:**
-          ${FILES_MODIFIED}
-
-          **Tests Written:**
-          ${TESTS_WRITTEN}
-
-          ## Test Plan
-          - Review changed files listed above
-          - Run existing test suite
-          - Verify acceptance criteria from issue #${{ github.event.issue.number }}
-
-          ## Validation Result
-          ### Build Status
-          ${BUILD_EMOJI} ${BUILD_STATUS} — ${BUILD_OUTPUT}
-
-          ### Test Status
-          ${TEST_EMOJI} ${TEST_STATUS} — ${TEST_OUTPUT}
-
-          ### Coverage
-          Before: ${COVERAGE_BEFORE} → After: ${COVERAGE_AFTER}
-
-          ## Known Limitations / Follow-ups
-          ${KNOWN_LIMITATIONS}
-
-          ## Risks / Open Questions
-          ${RISKS}" \
-            --base main \
+          # Check if Claude already created the PR
+          EXISTING_PR=$(gh pr list \
             --head ${{ steps.branch.outputs.branch_name }} \
-            --label "claude-review")
+            --json url --jq '.[0].url' 2>/dev/null || echo "")
 
-          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
-          echo "pr_number=${PR_URL##*/}" >> $GITHUB_OUTPUT
-          echo "✅ PR created: $PR_URL"
+          if [ -n "$EXISTING_PR" ]; then
+            echo "✅ PR already created by Claude: $EXISTING_PR"
+            echo "pr_url=$EXISTING_PR" >> $GITHUB_OUTPUT
+            echo "pr_number=${EXISTING_PR##*/}" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Claude did not create PR — creating fallback PR"
+            IMPL_SUMMARY=$(grep '^IMPLEMENTATION_SUMMARY=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "Automatically implemented by Claude AI")
+            FILES_CREATED=$(grep '^FILES_CREATED=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "See diff")
+            FILES_MODIFIED=$(grep '^FILES_MODIFIED=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "See diff")
+            TESTS_WRITTEN=$(grep '^TESTS_WRITTEN=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "See diff")
+            BUILD_STATUS=$(grep '^BUILD_STATUS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "not_run")
+            BUILD_OUTPUT=$(grep '^BUILD_OUTPUT=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
+            TEST_STATUS=$(grep '^TEST_STATUS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "not_run")
+            TEST_OUTPUT=$(grep '^TEST_OUTPUT=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
+            COVERAGE_BEFORE=$(grep '^COVERAGE_BEFORE=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
+            COVERAGE_AFTER=$(grep '^COVERAGE_AFTER=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
+            KNOWN_LIMITATIONS=$(grep '^KNOWN_LIMITATIONS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "None identified")
+            RISKS=$(grep '^RISKS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "None identified")
+
+            BUILD_EMOJI=$([ "$BUILD_STATUS" = "pass" ] && echo "✅" || [ "$BUILD_STATUS" = "not_run" ] && echo "⏭️" || echo "❌")
+            TEST_EMOJI=$([ "$TEST_STATUS" = "pass" ] && echo "✅" || [ "$TEST_STATUS" = "not_run" ] && echo "⏭️" || echo "❌")
+
+            PR_URL=$(gh pr create \
+              --title "[Claude - Issue #${{ github.event.issue.number }}] ${{ github.event.issue.title }}" \
+              --body "## 🤖 Claude Implementation
+
+            Fixes #${{ github.event.issue.number }}
+
+            ## Summary
+            ${IMPL_SUMMARY}
+
+            ## Changes Made
+            **Files Created:** ${FILES_CREATED}
+            **Files Modified:** ${FILES_MODIFIED}
+            **Tests Written:** ${TESTS_WRITTEN}
+
+            ## Test Plan
+            - Review changed files listed above
+            - Run existing test suite
+            - Verify acceptance criteria from issue #${{ github.event.issue.number }}
+
+            ## Validation Result
+            ### Build Status
+            ${BUILD_EMOJI} ${BUILD_STATUS} — ${BUILD_OUTPUT}
+
+            ### Test Status
+            ${TEST_EMOJI} ${TEST_STATUS} — ${TEST_OUTPUT}
+
+            ### Coverage
+            Before: ${COVERAGE_BEFORE} → After: ${COVERAGE_AFTER}
+
+            ## Known Limitations / Follow-ups
+            ${KNOWN_LIMITATIONS}
+
+            ## Risks / Open Questions
+            ${RISKS}" \
+              --base main \
+              --head ${{ steps.branch.outputs.branch_name }} \
+              --label "claude-review")
+
+            echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+            echo "pr_number=${PR_URL##*/}" >> $GITHUB_OUTPUT
+            echo "✅ Fallback PR created: $PR_URL"
+          fi
 
       # ─────────────────────────────────────────
       # STEP 12 — Attach validation evidence to PR
+      #           (fallback if Claude skipped it)
       # ─────────────────────────────────────────
       - name: Attach Validation Evidence to PR
+        id: attach-evidence                # ← added id
         if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/github-script@v7
         with:
@@ -518,22 +622,39 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
+            // Check if evidence already posted by Claude
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number: parseInt(prNumber)
+            });
+            const alreadyPosted = comments.some(c =>
+              c.body && c.body.includes('Claude: Validation Evidence')
+            );
+
+            if (alreadyPosted) {
+              console.log('✅ Validation evidence already posted by Claude — skipping');
+              return;
+            }
+
+            // Claude skipped — post from summary file
             let buildOutput = 'N/A';
             let testOutput = 'N/A';
             let buildStatus = 'not_run';
             let testStatus = 'not_run';
+            let coverageBefore = 'N/A';
+            let coverageAfter = 'N/A';
 
             try {
               const summary = fs.readFileSync('/tmp/pr_summary.txt', 'utf8');
-              const lines = summary.split('\n');
-              for (const line of lines) {
+              for (const line of summary.split('\n')) {
                 if (line.startsWith('BUILD_OUTPUT=')) buildOutput = line.split('=').slice(1).join('=');
                 if (line.startsWith('TEST_OUTPUT=')) testOutput = line.split('=').slice(1).join('=');
                 if (line.startsWith('BUILD_STATUS=')) buildStatus = line.split('=')[1];
                 if (line.startsWith('TEST_STATUS=')) testStatus = line.split('=')[1];
+                if (line.startsWith('COVERAGE_BEFORE=')) coverageBefore = line.split('=')[1];
+                if (line.startsWith('COVERAGE_AFTER=')) coverageAfter = line.split('=')[1];
               }
             } catch (e) {
-              console.log('No summary file found');
+              console.log('No summary file found — evidence unavailable');
             }
 
             const buildEmoji = buildStatus === 'pass' ? '✅' : buildStatus === 'not_run' ? '⏭️' : '❌';
@@ -556,13 +677,17 @@ jobs:
               ${testOutput}
               \`\`\`
 
-              > Evidence attached by Claude bot automatically`
+              ### Coverage Summary
+              Before: ${coverageBefore} → After: ${coverageAfter}
+
+              > Evidence attached by workflow fallback`
             });
 
       # ─────────────────────────────────────────
       # STEP 13 — Verify claude-review label on PR
       # ─────────────────────────────────────────
       - name: Verify claude-review Label on PR
+        id: verify-label                   # ← added id
         if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/github-script@v7
         with:
@@ -609,6 +734,7 @@ jobs:
       # STEP 14 — Add claude-done label to issue
       # ─────────────────────────────────────────
       - name: Add claude-done Label to Issue
+        id: claude-done                    # ← added id
         if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/github-script@v7
         with:
@@ -639,6 +765,8 @@ jobs:
       # ─────────────────────────────────────────
       - name: Move Issue to In Review
         if: steps.eligibility.outputs.eligible == 'true'
+        id: in-review
+        continue-on-error: true            # ← board update should not fail workflow
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -723,6 +851,7 @@ jobs:
       # STEP 16 — Post Final Success Comment
       # ─────────────────────────────────────────
       - name: Post Final Success Comment
+        id: post-success                   # ← added id
         if: steps.eligibility.outputs.eligible == 'true'
         uses: actions/github-script@v7
         with:
@@ -772,7 +901,7 @@ jobs:
               - Coverage: ${coverageBefore} → ${coverageAfter}
 
               ## Evidence
-              Validation output attached as PR comment above.
+              Full validation output attached as PR comment.
 
               ## Risks / Open Questions
               ${risks}
@@ -782,8 +911,9 @@ jobs:
               - ✅ Issue moved to In Progress
               - ✅ Branch created: \`${{ steps.branch.outputs.branch_name }}\`
               - ✅ Code implemented and tests written
-              - ✅ Validation run
+              - ✅ Build + test validation run
               - ✅ PR created with claude-review label
+              - ✅ Validation evidence attached to PR
               - ✅ claude-done label added to issue
               - ✅ Issue moved to In Review
 
@@ -791,7 +921,7 @@ jobs:
             });
 
       # ─────────────────────────────────────────
-      # STEP 17 — Post Failure Comment
+      # STEP 17 — Post Detailed Failure Comment
       # ─────────────────────────────────────────
       - name: Post Failure Comment
         if: failure()
@@ -799,24 +929,70 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const fs = require('fs');
+
+            // Track exact step that failed
+            const steps = {
+              'checkout':            { name: 'Checkout main branch',         status: '${{ steps.checkout.outcome }}' },
+              'configure-git':       { name: 'Configure Git',                status: '${{ steps.configure-git.outcome }}' },
+              'eligibility':         { name: 'Check Issue Eligibility',      status: '${{ steps.eligibility.outcome }}' },
+              'post-eligible':       { name: 'Post Eligible Comment',        status: '${{ steps.post-eligible.outcome }}' },
+              'in-progress':         { name: 'Move Issue to In Progress',    status: '${{ steps.in-progress.outcome }}' },
+              'branch':              { name: 'Create Feature Branch',        status: '${{ steps.branch.outcome }}' },
+              'post-branch':         { name: 'Post Branch Created Comment',  status: '${{ steps.post-branch.outcome }}' },
+              'existing-files':      { name: 'Get Existing Files List',      status: '${{ steps.existing-files.outcome }}' },
+              'claude':              { name: 'Claude Implement Code',        status: '${{ steps.claude.outcome }}' },
+              'post-implementation': { name: 'Post Implementation Comment',  status: '${{ steps.post-implementation.outcome }}' },
+              'create-pr':           { name: 'Fallback PR Creation',         status: '${{ steps.create-pr.outcome }}' },
+              'attach-evidence':     { name: 'Attach Validation Evidence',   status: '${{ steps.attach-evidence.outcome }}' },
+              'verify-label':        { name: 'Verify claude-review Label',   status: '${{ steps.verify-label.outcome }}' },
+              'claude-done':         { name: 'Add claude-done Label',        status: '${{ steps.claude-done.outcome }}' },
+              'in-review':           { name: 'Move Issue to In Review',      status: '${{ steps.in-review.outcome }}' },
+              'post-success':        { name: 'Post Final Success Comment',   status: '${{ steps.post-success.outcome }}' },
+            };
+
+            const failedSteps = Object.values(steps)
+              .filter(s => s.status === 'failure')
+              .map(s => `❌ **${s.name}**`);
+
+            const completedSteps = Object.values(steps)
+              .filter(s => s.status === 'success')
+              .map(s => `✅ ${s.name}`);
+
+            const skippedSteps = Object.values(steps)
+              .filter(s => s.status === 'skipped')
+              .map(s => `⏭️ ${s.name}`);
+
+            // Check if Claude reported a blocker
+            let claudeBlockerNote = '';
+            try {
+              const summary = fs.readFileSync('/tmp/pr_summary.txt', 'utf8');
+              if (summary.includes('BLOCKED=true')) {
+                claudeBlockerNote = '\n\n> ⚠️ **Claude reported a blocker** — check issue comments above for exact error details.';
+              }
+            } catch (e) {}
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: `## ❌ Claude: Workflow Failed
+              ${claudeBlockerNote}
 
-              The automated implementation workflow encountered an error.
+              **Failed at:**
+              ${failedSteps.length > 0 ? failedSteps.join('\n') : '❌ Unknown — check Actions log'}
 
-              **What was completed before failure:**
-              - Eligibility Check: ${{ steps.eligibility.outputs.eligible == 'true' && '✅' || '❌' }}
-              - Branch Created: ${{ steps.branch.outputs.branch_name != '' && '✅' || '❌' }}
-              - PR Created: ${{ steps.create-pr.outputs.pr_url != '' && '✅' || '❌' }}
+              **Completed before failure:**
+              ${completedSteps.length > 0 ? completedSteps.join('\n') : 'None'}
 
-              **What to do:**
-              1. Check the [Actions log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for exact error
-              2. Fix the issue
-              3. Re-add \`claude-ready\` label to retry
+              **Skipped steps:**
+              ${skippedSteps.length > 0 ? skippedSteps.join('\n') : 'None'}
 
-              **Direct link to failed run:**
-              ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
+              **How to investigate:**
+              🔍 [View full Actions log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+              **How to retry:**
+              1. Fix the issue shown in the Actions log
+              2. Remove \`claude-ready\` label from this issue
+              3. Re-add \`claude-ready\` label to trigger again`
             });
