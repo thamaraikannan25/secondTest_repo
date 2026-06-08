@@ -12,7 +12,7 @@ async function runSample() {
     return;
   }
 
-  const client = new Anthropic.Anthropic();
+  const client = new Anthropic();
 
   const response = await client.messages.create({
     model: model,
