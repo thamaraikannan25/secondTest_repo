@@ -5,11 +5,8 @@ on:
     types: [labeled]
     branches:
       - main
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'PR number to review'
-        required: true
+  repository_dispatch:
+    types: [claude-review]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -18,10 +15,9 @@ jobs:
   review-and-fix:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # ← fixed: handle both labeled trigger and workflow_dispatch trigger
     if: |
       (github.event_name == 'pull_request' && github.event.label.name == 'claude-review') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number != '')
+      (github.event_name == 'repository_dispatch')
     permissions:
       contents: write
       pull-requests: write
@@ -29,38 +25,32 @@ jobs:
       id-token: write
 
     steps:
+      - name: Resolve PR Number
+        id: pr-info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            PR_NUMBER="${{ github.event.client_payload.pr_number }}"
+          else
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+          fi
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          BRANCH=$(gh pr view $PR_NUMBER --json headRefName --jq '.headRefName')
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "✅ PR #$PR_NUMBER — Branch: $BRANCH"
+
       - name: Checkout PR Branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # ← fixed: handle both trigger types for ref
-          ref: ${{ github.event_name == 'workflow_dispatch' && '' || github.head_ref }}
+          ref: ${{ steps.pr-info.outputs.branch }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
         run: |
           git config user.name "claude-bot"
           git config user.email "claude-bot@users.noreply.github.com"
-
-      - name: Resolve PR Number and Checkout Branch
-        id: pr-info
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PR_NUMBER="${{ github.event.inputs.pr_number }}"
-          else
-            PR_NUMBER="${{ github.event.pull_request.number }}"
-          fi
-
-          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-
-          # Get PR branch name and checkout
-          BRANCH=$(gh pr view $PR_NUMBER --json headRefName --jq '.headRefName')
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-          git fetch origin "$BRANCH"
-          git checkout "$BRANCH"
-          echo "✅ Checked out branch: $BRANCH for PR #$PR_NUMBER"
 
       - name: Get Pre-Existing and New Files
         run: |
@@ -70,9 +60,6 @@ jobs:
           echo "=== New files ===" && cat /tmp/new_files.txt
           echo "=== Existing files ===" && cat /tmp/existing_files.txt
 
-      # ─────────────────────────────────────────
-      # LOOP 1 — Review + Fix
-      # ─────────────────────────────────────────
       - name: Claude Loop 1 — Review & Fix
         id: loop1
         uses: anthropics/claude-code-action@v1
@@ -94,7 +81,7 @@ jobs:
             - Write result to /tmp/loop1_status.txt → either "ISSUES_FIXED" or "ALL_CLEAR"
 
             ## STEP 1 — REVIEW:
-            - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }} to get full PR diff
+            - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
             - Review all changed files for bugs, security, quality, dead code, missing tests
             - Post inline comments on every problem line
             - Post comment:
@@ -108,7 +95,6 @@ jobs:
             - Dead code in new files → delete
             - Dead code in existing files → add reference or test
             - Missing tests → write proper tests using domain values
-            - Placeholder values → replace with real domain values
             - Bugs → fix directly
             - git add . && git commit -m "fix: claude loop 1 — [fixes]" && git push
             - Post comment:
@@ -128,11 +114,7 @@ jobs:
         run: |
           STATUS=$(cat /tmp/loop1_status.txt 2>/dev/null || echo "ISSUES_FIXED")
           echo "status=$STATUS" >> $GITHUB_OUTPUT
-          echo "Loop 1 status: $STATUS"
 
-      # ─────────────────────────────────────────
-      # LOOP 2 — Review + Fix (only if loop 1 had issues)
-      # ─────────────────────────────────────────
       - name: Claude Loop 2 — Re-Review & Fix
         id: loop2
         if: steps.check1.outputs.status != 'ALL_CLEAR'
@@ -146,7 +128,7 @@ jobs:
           prompt: |
             You are a fully autonomous code reviewer and fixer. This is LOOP 2 of 3.
             PR Number: ${{ steps.pr-info.outputs.pr_number }}
-            Loop 1 already applied fixes — re-review those fixes now.
+            Loop 1 already applied fixes — re-review now.
 
             ## STRICT RULES:
             - NEVER ask developer to fix anything
@@ -155,7 +137,7 @@ jobs:
             - Write result to /tmp/loop2_status.txt → either "ISSUES_FIXED" or "ALL_CLEAR"
 
             ## STEP 1 — RE-REVIEW:
-            - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }} to get latest PR diff including loop 1 fixes
+            - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
             - Review ALL changed files again carefully
             - Post inline comments on any remaining problem lines
             - Post comment:
@@ -185,11 +167,7 @@ jobs:
         run: |
           STATUS=$(cat /tmp/loop2_status.txt 2>/dev/null || echo "ISSUES_FIXED")
           echo "status=$STATUS" >> $GITHUB_OUTPUT
-          echo "Loop 2 status: $STATUS"
 
-      # ─────────────────────────────────────────
-      # LOOP 3 — Final Review
-      # ─────────────────────────────────────────
       - name: Claude Loop 3 — Final Review
         if: |
           steps.check1.outputs.status != 'ALL_CLEAR' &&
@@ -213,7 +191,7 @@ jobs:
             - This is the LAST loop — fix everything possible
 
             ## STEP 1 — FINAL REVIEW:
-            - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }} to get latest diff
+            - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
             - Review ALL changed files one final time
             - Post inline comments on any remaining issues
 
@@ -225,21 +203,12 @@ jobs:
             - Post this comment:
               "## ✅ Claude Review Complete — All Clear!
                All issues resolved across 3 loops.
-
-               **All fixes applied:**
-               - [complete list of all fixes]
-
+               **All fixes applied:** [complete list]
                👨‍💻 **PR is ready for your approval. Please review and merge.**"
 
             ## IF ISSUES STILL REMAIN AFTER LOOP 3:
             - Post this comment:
               "## ⚠️ Claude Review — 3 Loops Completed
-
-               **Auto-fixed during this session:**
-               - [list everything fixed in loops 1, 2 and 3]
-
-               **Still requires attention:**
-               - [list remaining issues with filename and line number]
-               - [explain clearly why each could not be auto-fixed]
-
+               **Auto-fixed:** [list everything fixed in loops 1, 2 and 3]
+               **Still requires attention:** [list remaining issues with filename and line]
                🔍 **These issues need developer review before merging.**"
