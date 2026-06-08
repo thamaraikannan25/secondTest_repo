@@ -66,6 +66,13 @@ jobs:
               return core.setOutput('eligible', 'false');
             }
 
+            // Skip if already worked — has claude-done label
+            const alreadyDone = issue.labels.some(l => l.name === 'claude-done');
+            if (alreadyDone) {
+              await comment(`## ⏭️ Claude: Skipping — Already Implemented\nThis issue already has the \`claude-done\` label.\nRemove it if you want Claude to re-implement.\n> No changes made.`);
+              return core.setOutput('eligible', 'false');
+            }
+
             // ✅ Issue picked up and eligible
             await comment(`## 🤖 Claude: Issue Picked Up\nIssue **#${issueNumber}** is eligible. Starting implementation now...`);
             core.setOutput('eligible', 'true');
@@ -297,17 +304,28 @@ jobs:
               `> ⚠️ Evidence posted by workflow fallback`
             });
 
-      # ✅ Issue implemented successfully
+      # ✅ Add claude-done label + post success comment
       - name: Post Success Comment
+        id: post-success
         if: steps.eligibility.outputs.eligible == 'true' && success()
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const issueNumber = context.issue.number;
+
+            // Add claude-done label (create if missing)
+            try { await github.rest.issues.getLabel({ owner, repo, name: 'claude-done' }); }
+            catch { await github.rest.issues.createLabel({ owner, repo, name: 'claude-done', color: '0e8a16', description: 'Issue implemented by Claude' }); }
+            await github.rest.issues.addLabels({ owner, repo, issue_number: issueNumber, labels: ['claude-done'] });
+
+            // Remove claude-ready so it won't re-trigger
+            try { await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name: 'claude-ready' }); } catch(e) {}
+
             await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `## ✅ Claude: Implementation Successful\nPR created and ready for review.\n\n**PR:** ${{ steps.create-pr.outputs.pr_url }}\n**Branch:** \`${{ steps.branch.outputs.branch_name }}\`\n\n👨‍💻 Please review and approve to merge.`
+              owner, repo, issue_number: issueNumber,
+              body: `## ✅ Claude: Implementation Successful\nPR created and ready for review.\n\n**PR:** ${{ steps.create-pr.outputs.pr_url }}\n**Branch:** \`${{ steps.branch.outputs.branch_name }}\`\n\n> \`claude-done\` label added — issue won\'t be re-processed.\n\n👨‍💻 Please review and approve to merge.`
             });
 
       # ❌ Issue implementation failed
