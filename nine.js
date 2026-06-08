@@ -22,7 +22,10 @@ async function runSample() {
     ]
   });
 
-  console.log(response.content[0].text);
+  const textBlock = response.content.find(block => block.type === "text");
+  if (textBlock) {
+    console.log(textBlock.text);
+  }
 }
 
-runSample();
+runSample().catch(console.error);
