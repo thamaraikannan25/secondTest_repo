@@ -14,9 +14,11 @@ function greet(name) {
 
 const EIGHT = 8;
 
-console.log("The number eight:", EIGHT);
-console.log("8 + 8 =", add(EIGHT, EIGHT));
-console.log("8 * 8 =", multiply(EIGHT, EIGHT));
-console.log(greet("World"));
+if (require.main === module) {
+  console.log("The number eight:", EIGHT);
+  console.log("8 + 8 =", add(EIGHT, EIGHT));
+  console.log("8 * 8 =", multiply(EIGHT, EIGHT));
+  console.log(greet("World"));
+}
 
 module.exports = { add, multiply, greet, EIGHT };
