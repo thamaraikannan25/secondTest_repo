@@ -25,6 +25,9 @@ jobs:
       id-token: write
 
     steps:
+      # ─────────────────────────────────────────
+      # STEP 1 — Resolve PR number first (no git needed)
+      # ─────────────────────────────────────────
       - name: Resolve PR Number
         id: pr-info
         env:
@@ -36,10 +39,15 @@ jobs:
             PR_NUMBER="${{ github.event.pull_request.number }}"
           fi
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-          BRANCH=$(gh pr view $PR_NUMBER --json headRefName --jq '.headRefName')
+
+          # Get branch name using gh CLI (no git needed)
+          BRANCH=$(gh pr view $PR_NUMBER --repo ${{ github.repository }} --json headRefName --jq '.headRefName')
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
           echo "✅ PR #$PR_NUMBER — Branch: $BRANCH"
 
+      # ─────────────────────────────────────────
+      # STEP 2 — Checkout using resolved branch
+      # ─────────────────────────────────────────
       - name: Checkout PR Branch
         uses: actions/checkout@v4
         with:
@@ -47,11 +55,17 @@ jobs:
           ref: ${{ steps.pr-info.outputs.branch }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # ─────────────────────────────────────────
+      # STEP 3 — Configure Git
+      # ─────────────────────────────────────────
       - name: Configure Git
         run: |
           git config user.name "claude-bot"
           git config user.email "claude-bot@users.noreply.github.com"
 
+      # ─────────────────────────────────────────
+      # STEP 4 — Get file lists (git available now)
+      # ─────────────────────────────────────────
       - name: Get Pre-Existing and New Files
         run: |
           git fetch origin main
@@ -60,6 +74,9 @@ jobs:
           echo "=== New files ===" && cat /tmp/new_files.txt
           echo "=== Existing files ===" && cat /tmp/existing_files.txt
 
+      # ─────────────────────────────────────────
+      # LOOP 1 — Review + Fix
+      # ─────────────────────────────────────────
       - name: Claude Loop 1 — Review & Fix
         id: loop1
         uses: anthropics/claude-code-action@v1
@@ -114,7 +131,11 @@ jobs:
         run: |
           STATUS=$(cat /tmp/loop1_status.txt 2>/dev/null || echo "ISSUES_FIXED")
           echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "Loop 1 status: $STATUS"
 
+      # ─────────────────────────────────────────
+      # LOOP 2 — Review + Fix (only if loop 1 had issues)
+      # ─────────────────────────────────────────
       - name: Claude Loop 2 — Re-Review & Fix
         id: loop2
         if: steps.check1.outputs.status != 'ALL_CLEAR'
@@ -167,7 +188,11 @@ jobs:
         run: |
           STATUS=$(cat /tmp/loop2_status.txt 2>/dev/null || echo "ISSUES_FIXED")
           echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "Loop 2 status: $STATUS"
 
+      # ─────────────────────────────────────────
+      # LOOP 3 — Final Review
+      # ─────────────────────────────────────────
       - name: Claude Loop 3 — Final Review
         if: |
           steps.check1.outputs.status != 'ALL_CLEAR' &&
