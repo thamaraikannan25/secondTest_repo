@@ -1,5 +1,5 @@
-function think(thought) {
-  console.log(`Thinking: ${thought}`);
+function think(thought, logger = console.log) {
+  logger(`Thinking: ${thought}`);
   return thought;
 }
 
