@@ -181,9 +181,10 @@ jobs:
             ## Risks
             [or none]"
 
-            ## STEP 8 — VERIFY claude-review LABEL:
+            ## STEP 8 — VERIFY LABELS:
             gh pr view --json labels | grep -q claude-review || gh pr edit --add-label "claude-review"
-
+            gh pr view --json labels | grep -q tensure-claude-bot || gh pr edit --add-label "tensure-claude-bot"
+            
             ## STEP 9 — ATTACH EVIDENCE TO PR:
             gh pr comment --body "## 🔍 Claude: Validation Evidence
             ### 🖥️ React UI
