@@ -328,6 +328,24 @@ jobs:
               body: `## ✅ Claude: Implementation Successful\nPR created and ready for review.\n\n**PR:** ${{ steps.create-pr.outputs.pr_url }}\n**Branch:** \`${{ steps.branch.outputs.branch_name }}\`\n\n> \`claude-done\` label added — issue won\'t be re-processed.\n\n👨‍💻 Please review and approve to merge.`
             });
 
+      - name: Trigger Claude Review Workflow
+        id: trigger-review
+        if: steps.eligibility.outputs.eligible == 'true' && success()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'claude-review.yml',
+              ref: 'main',
+              inputs: {
+                pr_number: '${{ steps.create-pr.outputs.pr_number }}'
+              }
+            });
+            console.log('✅ claude-review workflow triggered for PR #${{ steps.create-pr.outputs.pr_number }}');
+
       # ❌ Issue implementation failed
       - name: Post Failure Comment
         if: failure()
