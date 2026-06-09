@@ -23,7 +23,7 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
@@ -51,12 +51,15 @@ jobs:
               await comment(`## ❌ Claude: Not Starting\n- Issue is closed\n> No changes made.`);
               return core.setOutput('eligible', 'false');
             }
-            const { data: prs } = await github.rest.pulls.list({ owner, repo, state: 'open' });
-            const existing = prs.find(pr => pr.body && (
-              pr.body.includes(`#${issueNumber}`) ||
-              pr.body.includes(`Fixes #${issueNumber}`) ||
-              pr.body.includes(`Closes #${issueNumber}`)
-            ));
+            const { data: search } = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} is:pr is:open "${issueNumber}" in:body`,
+            });
+            const existing = search.items.find((pr) =>
+              pr.body &&
+              (pr.body.includes(`Fixes #${issueNumber}`) ||
+                pr.body.includes(`Closes #${issueNumber}`) ||
+                pr.body.includes(`#${issueNumber}`))
+            );
             if (existing) {
               await comment(`## ⚠️ Claude: Not Starting — Duplicate PR\nActive PR exists: ${existing.html_url}\n> No changes made.`);
               return core.setOutput('eligible', 'false');
@@ -80,6 +83,7 @@ jobs:
           ISSUE_NUMBER=${{ github.event.issue.number }}
           CLEAN_TITLE=$(echo "${{ github.event.issue.title }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | cut -c1-40)
           BRANCH_NAME="claude-issue-${ISSUE_NUMBER}-${CLEAN_TITLE}"
+          git fetch origin main --depth=1
           git push origin --delete "$BRANCH_NAME" 2>/dev/null || true
           git checkout -b "$BRANCH_NAME"
           git push origin "$BRANCH_NAME"
@@ -88,7 +92,9 @@ jobs:
       - name: Get Existing Files List
         id: existing-files
         if: steps.eligibility.outputs.eligible == 'true'
-        run: git ls-tree -r main --name-only > /tmp/existing_files.txt
+        run: |
+          git fetch origin main --depth=1
+          git ls-tree -r origin/main --name-only > /tmp/existing_files.txt
 
       - name: Claude Implement Code
         id: claude
@@ -99,12 +105,13 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: >-
             --model claude-sonnet-4-6
-            --allowedTools "Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh pr create:*),Bash(gh pr view:*),Bash(gh pr edit:*),Bash(gh pr comment:*),Bash(gh label create:*),Bash(gh label list:*),Bash(npm ci:*),Bash(npm install:*),Bash(npm run build:*),Bash(npm test:*),Bash(npm run test:*),Bash(npm run lint:*),Bash(pip install:*),Bash(pip3 install:*),Bash(python -m pytest:*),Bash(python3 -m pytest:*),Bash(python -c:*),Bash(python3 -c:*)"
+            --allowedTools "Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(gh issue view:*),Bash(gh issue comment:*)"
           prompt: |
             You are a fully autonomous developer on issue #${{ github.event.issue.number }}.
             Branch: ${{ steps.branch.outputs.branch_name }} (already created — do NOT create another).
 
-            REPO: React UI (npm) + Python Flask API (pip/pytest). Validate BOTH after implementing.
+            REPO: React UI in ui/ (npm/Vitest) + Python Flask API in api/ (pip/pytest).
+            Validation, PR creation, and evidence comments are handled by the workflow AFTER you push — do NOT run npm, pip, pytest, or gh pr commands.
 
             ## BLOCKER RULE:
             If blocked → post issue comment with exact error → write BLOCKED=true to /tmp/pr_summary.txt → STOP.
@@ -115,120 +122,224 @@ jobs:
             If unclear → post clarification comment → STOP.
 
             ## STEP 2 — UNDERSTAND CODEBASE:
-            Read /tmp/existing_files.txt, relevant files, package.json, requirements.txt, existing tests.
+            Do NOT read all of /tmp/existing_files.txt — use grep/find for paths relevant to this issue.
+            Read package.json, requirements.txt, and existing tests only as needed.
 
             ## STEP 3 — IMPLEMENT:
-            - NEVER modify /tmp/existing_files.txt files unless required
+            - NEVER modify files listed in /tmp/existing_files.txt unless required for this issue
             - Keep diff small — only this issue, no unrelated changes
             - Write tests for all new/modified behavior
             - Match existing code style exactly
+            - Work from ui/ for frontend changes and api/ for backend changes
 
-            ## STEP 4 — VALIDATE REACT UI:
-            npm ci 2>&1 | tee /tmp/npm_install.txt || npm install 2>&1 | tee /tmp/npm_install.txt
-            npm run build 2>&1 | tee /tmp/build_output.txt
-            npm test -- --watchAll=false --coverage --coverageReporters=text 2>&1 | tee /tmp/test_output.txt
-            If build/tests fail → attempt fix → re-run → record result regardless.
-            Write /tmp/ui_validation.txt:
-            UI_BUILD_STATUS=[pass/fail/error]
-            UI_BUILD_SUMMARY=[last 10 lines of build output]
-            UI_TEST_STATUS=[pass/fail/not_configured]
-            UI_TEST_COUNTS=[X passed Y failed]
-            UI_COVERAGE_STATEMENTS=[X%]
-            UI_COVERAGE_BRANCHES=[X%]
-            UI_COVERAGE_FUNCTIONS=[X%]
-            UI_COVERAGE_LINES=[X%]
-
-            ## STEP 5 — VALIDATE FLASK API:
-            pip install -r requirements.txt 2>&1 | tee /tmp/pip_output.txt
-            python -m pytest --tb=short -v 2>&1 | tee /tmp/pytest_output.txt
-            python -m pytest --cov=. --cov-report=term-missing --tb=short 2>&1 | tee /tmp/coverage_output.txt
-            python -c "from app import app; app.config['TESTING']=True; app.test_client(); print('✅ Flask OK')" 2>&1 | tee /tmp/flask_smoke.txt
-            If tests fail → attempt fix → re-run → record result regardless.
-            Write /tmp/api_validation.txt:
-            API_PYTEST_STATUS=[pass/fail/not_configured]
-            API_PYTEST_COUNTS=[X passed Y failed]
-            API_COVERAGE_TOTAL=[X% or N/A]
-            API_FLASK_SMOKE=[pass/fail]
-            API_FLASK_SMOKE_OUTPUT=[one line]
-
-            ## STEP 6 — COMMIT AND PUSH:
+            ## STEP 4 — COMMIT AND PUSH:
             git add . && git commit -m "feat: implement issue #${{ github.event.issue.number }} — ${{ github.event.issue.title }}" && git push origin ${{ steps.branch.outputs.branch_name }}
 
-            ## STEP 7 — CREATE PR:
-            Read /tmp/ui_validation.txt and /tmp/api_validation.txt then create PR:
-            gh pr create \
-              --title "[Claude - Issue #${{ github.event.issue.number }}] ${{ github.event.issue.title }}" \
-              --base main \
-              --head ${{ steps.branch.outputs.branch_name }} \
-              --label "claude-review" \
-              --body "## 🤖 Claude Implementation
-            Fixes #${{ github.event.issue.number }}
-            ## Summary
-            [what was implemented]
-            ## Changes Made
-            **Files Created:** [list] | **Files Modified:** [list] | **Tests Written:** [list]
-            ## Validation Result
-            ### 🖥️ React UI
-            Build: [✅/❌] [UI_BUILD_STATUS] — [UI_BUILD_SUMMARY]
-            Tests: [✅/❌] [UI_TEST_STATUS] — [UI_TEST_COUNTS]
-            Coverage: Statements [UI_COVERAGE_STATEMENTS] | Branches [UI_COVERAGE_BRANCHES] | Functions [UI_COVERAGE_FUNCTIONS] | Lines [UI_COVERAGE_LINES]
-            ### 🐍 Flask API
-            pytest: [✅/❌] [API_PYTEST_STATUS] — [API_PYTEST_COUNTS]
-            Coverage: [API_COVERAGE_TOTAL]
-            Smoke: [✅/❌] [API_FLASK_SMOKE_OUTPUT]
-            ## Known Limitations
-            [or none]
-            ## Risks
-            [or none]"
-
-            ## STEP 8 — VERIFY LABELS:
-            gh pr view --json labels | grep -q claude-review || gh pr edit --add-label "claude-review"
-            gh pr view --json labels | grep -q tensure-claude-bot || gh pr edit --add-label "tensure-claude-bot"
-            
-            ## STEP 9 — ATTACH EVIDENCE TO PR:
-            gh pr comment --body "## 🔍 Claude: Validation Evidence
-            ### 🖥️ React UI
-            **Build** [✅/❌ UI_BUILD_STATUS]:
-            \`\`\`
-            [FULL /tmp/build_output.txt — do not truncate]
-            \`\`\`
-            **Tests** [✅/❌ UI_TEST_STATUS] — [UI_TEST_COUNTS]:
-            \`\`\`
-            [FULL /tmp/test_output.txt — do not truncate]
-            \`\`\`
-            **Coverage:** Statements [UI_COVERAGE_STATEMENTS] | Branches [UI_COVERAGE_BRANCHES] | Functions [UI_COVERAGE_FUNCTIONS] | Lines [UI_COVERAGE_LINES]
-            ---
-            ### 🐍 Flask API
-            **pytest** [✅/❌ API_PYTEST_STATUS] — [API_PYTEST_COUNTS]:
-            \`\`\`
-            [FULL /tmp/pytest_output.txt — do not truncate]
-            \`\`\`
-            **Coverage:**
-            \`\`\`
-            [FULL /tmp/coverage_output.txt — do not truncate]
-            \`\`\`
-            **Smoke Test** [✅/❌ API_FLASK_SMOKE]:
-            \`\`\`
-            [/tmp/flask_smoke.txt content]
-            \`\`\`
-            > 🤖 Evidence attached by Claude bot"
-
-            ## STEP 10 — WRITE /tmp/pr_summary.txt:
+            ## STEP 5 — WRITE /tmp/pr_summary.txt (implementation metadata only):
             BLOCKED=false
-            IMPLEMENTATION_SUMMARY=[paragraph]
-            FILES_CREATED=[list] FILES_MODIFIED=[list] TESTS_WRITTEN=[list]
-            UI_BUILD_STATUS=[pass/fail/error] UI_BUILD_OUTPUT=[one line]
-            UI_TEST_STATUS=[pass/fail/not_configured] UI_TEST_OUTPUT=[one line with counts]
-            UI_COVERAGE_STATEMENTS=[X%] UI_COVERAGE_BRANCHES=[X%] UI_COVERAGE_FUNCTIONS=[X%] UI_COVERAGE_LINES=[X%]
-            API_PYTEST_STATUS=[pass/fail/not_configured] API_PYTEST_OUTPUT=[one line with counts]
-            API_COVERAGE_TOTAL=[X% or N/A] API_FLASK_SMOKE=[pass/fail/not_run]
-            PR_URL=[full url] KNOWN_LIMITATIONS=[or none] RISKS=[or none]
+            IMPLEMENTATION_SUMMARY=[paragraph describing what was implemented]
+            FILES_CREATED=[comma-separated list]
+            FILES_MODIFIED=[comma-separated list]
+            TESTS_WRITTEN=[comma-separated list]
+            KNOWN_LIMITATIONS=[or none]
+            RISKS=[or none]
 
-            SAFETY: Never force push, auto-merge, auto-close, delete branches, add labels, or move project status.
+            SAFETY: Never force push, auto-merge, auto-close, delete branches, or move project status.
 
-      - name: Fallback PR Creation
-        id: create-pr
+      - name: Check Blocked Status
+        id: blocked
         if: steps.eligibility.outputs.eligible == 'true'
+        run: |
+          if grep -q '^BLOCKED=true' /tmp/pr_summary.txt 2>/dev/null; then
+            echo "blocked=true" >> $GITHUB_OUTPUT
+          else
+            echo "blocked=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout Feature Branch
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true'
+        run: |
+          git fetch origin ${{ steps.branch.outputs.branch_name }} --depth=1
+          git checkout ${{ steps.branch.outputs.branch_name }}
+
+      - name: Detect Validation Scope
+        id: scope
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true'
+        run: |
+          git fetch origin main --depth=1
+          CHANGED=$(git diff --name-only origin/main...HEAD || true)
+          echo "Changed files:"
+          echo "$CHANGED"
+          VALIDATE_UI=false
+          VALIDATE_API=false
+          echo "$CHANGED" | grep -q '^ui/' && VALIDATE_UI=true
+          echo "$CHANGED" | grep -q '^api/' && VALIDATE_API=true
+          if [ "$VALIDATE_UI" = false ] && [ "$VALIDATE_API" = false ] && [ -n "$CHANGED" ]; then
+            VALIDATE_UI=true
+            VALIDATE_API=true
+          fi
+          echo "validate_ui=$VALIDATE_UI" >> $GITHUB_OUTPUT
+          echo "validate_api=$VALIDATE_API" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && steps.scope.outputs.validate_ui == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ui/.nvmrc
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Validate React UI
+        id: validate-ui
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && steps.scope.outputs.validate_ui == 'true'
+        run: |
+          set +e
+          cd ui
+          npm ci 2>&1 | tee /tmp/npm_install.txt || npm install 2>&1 | tee /tmp/npm_install.txt
+          npm run build 2>&1 | tee /tmp/build_output.txt
+          BUILD_EXIT=$?
+          if [ $BUILD_EXIT -eq 0 ]; then
+            UI_BUILD_STATUS=pass
+          else
+            UI_BUILD_STATUS=fail
+          fi
+          UI_BUILD_SUMMARY=$(tail -10 /tmp/build_output.txt | tr '\n' ' ')
+          npm run test:coverage 2>&1 | tee /tmp/test_output.txt
+          TEST_EXIT=$?
+          if [ $TEST_EXIT -eq 0 ]; then
+            UI_TEST_STATUS=pass
+          else
+            UI_TEST_STATUS=fail
+          fi
+          UI_TEST_COUNTS=$(grep -Eo '[0-9]+ passed' /tmp/test_output.txt | tail -1 || echo "0 passed")
+          FAILED=$(grep -Eo '[0-9]+ failed' /tmp/test_output.txt | tail -1 || echo "")
+          [ -n "$FAILED" ] && UI_TEST_COUNTS="$UI_TEST_COUNTS $FAILED"
+          UI_COVERAGE_STATEMENTS=$(grep -E 'Statements\s*:' /tmp/test_output.txt | tail -1 | grep -Eo '[0-9.]+%' | head -1 || echo "N/A")
+          UI_COVERAGE_BRANCHES=$(grep -E 'Branches\s*:' /tmp/test_output.txt | tail -1 | grep -Eo '[0-9.]+%' | head -1 || echo "N/A")
+          UI_COVERAGE_FUNCTIONS=$(grep -E 'Functions\s*:' /tmp/test_output.txt | tail -1 | grep -Eo '[0-9.]+%' | head -1 || echo "N/A")
+          UI_COVERAGE_LINES=$(grep -E 'Lines\s*:' /tmp/test_output.txt | tail -1 | grep -Eo '[0-9.]+%' | head -1 || echo "N/A")
+          {
+            echo "UI_BUILD_STATUS=$UI_BUILD_STATUS"
+            echo "UI_BUILD_SUMMARY=$UI_BUILD_SUMMARY"
+            echo "UI_TEST_STATUS=$UI_TEST_STATUS"
+            echo "UI_TEST_COUNTS=$UI_TEST_COUNTS"
+            echo "UI_COVERAGE_STATEMENTS=$UI_COVERAGE_STATEMENTS"
+            echo "UI_COVERAGE_BRANCHES=$UI_COVERAGE_BRANCHES"
+            echo "UI_COVERAGE_FUNCTIONS=$UI_COVERAGE_FUNCTIONS"
+            echo "UI_COVERAGE_LINES=$UI_COVERAGE_LINES"
+          } > /tmp/ui_validation.txt
+
+      - name: Skip React UI Validation
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && steps.scope.outputs.validate_ui != 'true'
+        run: |
+          echo "Skipped — no ui/ changes in this branch" | tee /tmp/build_output.txt /tmp/test_output.txt
+          {
+            echo "UI_BUILD_STATUS=not_run"
+            echo "UI_BUILD_SUMMARY=skipped — no ui/ changes"
+            echo "UI_TEST_STATUS=not_run"
+            echo "UI_TEST_COUNTS=N/A"
+            echo "UI_COVERAGE_STATEMENTS=N/A"
+            echo "UI_COVERAGE_BRANCHES=N/A"
+            echo "UI_COVERAGE_FUNCTIONS=N/A"
+            echo "UI_COVERAGE_LINES=N/A"
+          } > /tmp/ui_validation.txt
+
+      - name: Setup Python
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && steps.scope.outputs.validate_api == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: api/.python-version
+          cache: pip
+          cache-dependency-path: api/requirements.txt
+
+      - name: Validate Flask API
+        id: validate-api
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && steps.scope.outputs.validate_api == 'true'
+        run: |
+          set +e
+          cd api
+          pip install -r requirements.txt 2>&1 | tee /tmp/pip_output.txt
+          python -m pytest --cov=. --cov-report=term-missing --tb=short -v 2>&1 | tee /tmp/pytest_output.txt
+          PYTEST_EXIT=$?
+          cp /tmp/pytest_output.txt /tmp/coverage_output.txt
+          if [ $PYTEST_EXIT -eq 0 ]; then
+            API_PYTEST_STATUS=pass
+          else
+            API_PYTEST_STATUS=fail
+          fi
+          API_PYTEST_COUNTS=$(grep -E '=+ [0-9]+ passed' /tmp/pytest_output.txt | tail -1 | grep -Eo '[0-9]+ passed' || echo "0 passed")
+          FAILED=$(grep -E '=+ [0-9]+ passed' /tmp/pytest_output.txt | tail -1 | grep -Eo '[0-9]+ failed' || echo "")
+          [ -n "$FAILED" ] && API_PYTEST_COUNTS="$API_PYTEST_COUNTS, $FAILED"
+          API_COVERAGE_TOTAL=$(grep -E '^TOTAL' /tmp/pytest_output.txt | tail -1 | awk '{print $NF}' || echo "N/A")
+          python -c "from app import app; app.config['TESTING']=True; app.test_client(); print('✅ Flask OK')" 2>&1 | tee /tmp/flask_smoke.txt
+          SMOKE_EXIT=$?
+          if [ $SMOKE_EXIT -eq 0 ]; then
+            API_FLASK_SMOKE=pass
+            API_FLASK_SMOKE_OUTPUT=$(tail -1 /tmp/flask_smoke.txt)
+          else
+            API_FLASK_SMOKE=fail
+            API_FLASK_SMOKE_OUTPUT=$(tail -1 /tmp/flask_smoke.txt)
+          fi
+          {
+            echo "API_PYTEST_STATUS=$API_PYTEST_STATUS"
+            echo "API_PYTEST_COUNTS=$API_PYTEST_COUNTS"
+            echo "API_COVERAGE_TOTAL=$API_COVERAGE_TOTAL"
+            echo "API_FLASK_SMOKE=$API_FLASK_SMOKE"
+            echo "API_FLASK_SMOKE_OUTPUT=$API_FLASK_SMOKE_OUTPUT"
+          } > /tmp/api_validation.txt
+
+      - name: Skip Flask API Validation
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && steps.scope.outputs.validate_api != 'true'
+        run: |
+          echo "Skipped — no api/ changes in this branch" | tee /tmp/pytest_output.txt /tmp/coverage_output.txt /tmp/flask_smoke.txt
+          {
+            echo "API_PYTEST_STATUS=not_run"
+            echo "API_PYTEST_COUNTS=N/A"
+            echo "API_COVERAGE_TOTAL=N/A"
+            echo "API_FLASK_SMOKE=not_run"
+            echo "API_FLASK_SMOKE_OUTPUT=skipped — no api/ changes"
+          } > /tmp/api_validation.txt
+
+      - name: Merge Validation Summary
+        id: summary
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true'
+        run: |
+          get_val() { grep "^$1=" "/tmp/$2.txt" 2>/dev/null | cut -d= -f2- || echo "N/A"; }
+          UI_BUILD_STATUS=$(get_val UI_BUILD_STATUS ui_validation)
+          UI_BUILD_SUMMARY=$(get_val UI_BUILD_SUMMARY ui_validation)
+          UI_TEST_STATUS=$(get_val UI_TEST_STATUS ui_validation)
+          UI_TEST_COUNTS=$(get_val UI_TEST_COUNTS ui_validation)
+          UI_CS=$(get_val UI_COVERAGE_STATEMENTS ui_validation)
+          UI_CB=$(get_val UI_COVERAGE_BRANCHES ui_validation)
+          UI_CF=$(get_val UI_COVERAGE_FUNCTIONS ui_validation)
+          UI_CL=$(get_val UI_COVERAGE_LINES ui_validation)
+          API_PYTEST_STATUS=$(get_val API_PYTEST_STATUS api_validation)
+          API_PYTEST_COUNTS=$(get_val API_PYTEST_COUNTS api_validation)
+          API_COVERAGE_TOTAL=$(get_val API_COVERAGE_TOTAL api_validation)
+          API_FLASK_SMOKE=$(get_val API_FLASK_SMOKE api_validation)
+          API_FLASK_SMOKE_OUT=$(get_val API_FLASK_SMOKE_OUTPUT api_validation)
+          {
+            grep -E '^(BLOCKED|IMPLEMENTATION_SUMMARY|FILES_CREATED|FILES_MODIFIED|TESTS_WRITTEN|KNOWN_LIMITATIONS|RISKS)=' /tmp/pr_summary.txt 2>/dev/null \
+              || echo "IMPLEMENTATION_SUMMARY=Implemented by Claude AI"
+            echo "UI_BUILD_STATUS=$UI_BUILD_STATUS"
+            echo "UI_BUILD_OUTPUT=$UI_BUILD_SUMMARY"
+            echo "UI_TEST_STATUS=$UI_TEST_STATUS"
+            echo "UI_TEST_OUTPUT=$UI_TEST_COUNTS"
+            echo "UI_COVERAGE_STATEMENTS=$UI_CS"
+            echo "UI_COVERAGE_BRANCHES=$UI_CB"
+            echo "UI_COVERAGE_FUNCTIONS=$UI_CF"
+            echo "UI_COVERAGE_LINES=$UI_CL"
+            echo "API_PYTEST_STATUS=$API_PYTEST_STATUS"
+            echo "API_PYTEST_OUTPUT=$API_PYTEST_COUNTS"
+            echo "API_COVERAGE_TOTAL=$API_COVERAGE_TOTAL"
+            echo "API_FLASK_SMOKE=$API_FLASK_SMOKE"
+            echo "API_FLASK_SMOKE_OUTPUT=$API_FLASK_SMOKE_OUT"
+          } > /tmp/pr_summary_merged.txt
+          mv /tmp/pr_summary_merged.txt /tmp/pr_summary.txt
+
+      - name: Create Pull Request
+        id: create-pr
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -236,74 +347,103 @@ jobs:
           if [ -n "$EXISTING_PR" ]; then
             echo "pr_url=$EXISTING_PR" >> $GITHUB_OUTPUT
             echo "pr_number=${EXISTING_PR##*/}" >> $GITHUB_OUTPUT
-          else
-            IMPL=$(grep '^IMPLEMENTATION_SUMMARY=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "Implemented by Claude AI")
-            UB=$(grep '^UI_BUILD_STATUS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "not_run")
-            UT=$(grep '^UI_TEST_STATUS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "not_run")
-            UT_OUT=$(grep '^UI_TEST_OUTPUT=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-            UC_S=$(grep '^UI_COVERAGE_STATEMENTS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-            UC_B=$(grep '^UI_COVERAGE_BRANCHES=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-            UC_F=$(grep '^UI_COVERAGE_FUNCTIONS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-            UC_L=$(grep '^UI_COVERAGE_LINES=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-            AT=$(grep '^API_PYTEST_STATUS=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "not_run")
-            AT_OUT=$(grep '^API_PYTEST_OUTPUT=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-            AC=$(grep '^API_COVERAGE_TOTAL=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A")
-            AS=$(grep '^API_FLASK_SMOKE=' /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "not_run")
-            UBE=$([ "$UB" = "pass" ] && echo "✅" || echo "❌")
-            UTE=$([ "$UT" = "pass" ] && echo "✅" || echo "❌")
-            ATE=$([ "$AT" = "pass" ] && echo "✅" || echo "❌")
-            ASE=$([ "$AS" = "pass" ] && echo "✅" || echo "❌")
-            PR_URL=$(gh pr create \
-              --title "[Claude - Issue #${{ github.event.issue.number }}] ${{ github.event.issue.title }}" \
-              --base main --head ${{ steps.branch.outputs.branch_name }} --label "claude-review" \
-              --body "## 🤖 Claude Implementation
-            Fixes #${{ github.event.issue.number }}
-            ## Summary
-            ${IMPL}
-            ## Validation Result
-            ### 🖥️ React UI
-            Build: ${UBE} ${UB} | Tests: ${UTE} ${UT} — ${UT_OUT}
-            Coverage: Statements ${UC_S} | Branches ${UC_B} | Functions ${UC_F} | Lines ${UC_L}
-            ### 🐍 Flask API
-            pytest: ${ATE} ${AT} — ${AT_OUT} | Coverage: ${AC} | Smoke: ${ASE} ${AS}")
-            echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
-            echo "pr_number=${PR_URL##*/}" >> $GITHUB_OUTPUT
+            exit 0
           fi
+          get() { grep "^$1=" /tmp/pr_summary.txt 2>/dev/null | cut -d= -f2- || echo "N/A"; }
+          IMPL=$(get IMPLEMENTATION_SUMMARY)
+          FC=$(get FILES_CREATED)
+          FM=$(get FILES_MODIFIED)
+          TW=$(get TESTS_WRITTEN)
+          KL=$(get KNOWN_LIMITATIONS)
+          RK=$(get RISKS)
+          UB=$(get UI_BUILD_STATUS)
+          UBS=$(get UI_BUILD_OUTPUT)
+          UT=$(get UI_TEST_STATUS)
+          UTC=$(get UI_TEST_OUTPUT)
+          UC_S=$(get UI_COVERAGE_STATEMENTS)
+          UC_B=$(get UI_COVERAGE_BRANCHES)
+          UC_F=$(get UI_COVERAGE_FUNCTIONS)
+          UC_L=$(get UI_COVERAGE_LINES)
+          AT=$(get API_PYTEST_STATUS)
+          ATC=$(get API_PYTEST_OUTPUT)
+          AC=$(get API_COVERAGE_TOTAL)
+          AS=$(get API_FLASK_SMOKE)
+          AS_OUT=$(get API_FLASK_SMOKE_OUTPUT)
+          UBE=$([ "$UB" = "pass" ] && echo "✅" || ([ "$UB" = "not_run" ] && echo "⏭️" || echo "❌"))
+          UTE=$([ "$UT" = "pass" ] && echo "✅" || ([ "$UT" = "not_run" ] && echo "⏭️" || echo "❌"))
+          ATE=$([ "$AT" = "pass" ] && echo "✅" || ([ "$AT" = "not_run" ] && echo "⏭️" || echo "❌"))
+          ASE=$([ "$AS" = "pass" ] && echo "✅" || ([ "$AS" = "not_run" ] && echo "⏭️" || echo "❌"))
+          PR_URL=$(gh pr create \
+            --title "[Claude - Issue #${{ github.event.issue.number }}] ${{ github.event.issue.title }}" \
+            --base main \
+            --head ${{ steps.branch.outputs.branch_name }} \
+            --label "claude-review" \
+            --body "$(cat <<BODY
+          ## 🤖 Claude Implementation
+          Fixes #${{ github.event.issue.number }}
+          ## Summary
+          ${IMPL}
+          ## Changes Made
+          **Files Created:** ${FC} | **Files Modified:** ${FM} | **Tests Written:** ${TW}
+          ## Validation Result
+          ### 🖥️ React UI
+          Build: ${UBE} ${UB} — ${UBS}
+          Tests: ${UTE} ${UT} — ${UTC}
+          Coverage: Statements ${UC_S} | Branches ${UC_B} | Functions ${UC_F} | Lines ${UC_L}
+          ### 🐍 Flask API
+          pytest: ${ATE} ${AT} — ${ATC}
+          Coverage: ${AC}
+          Smoke: ${ASE} ${AS_OUT}
+          ## Known Limitations
+          ${KL}
+          ## Risks
+          ${RK}
+          BODY
+          )")
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "pr_number=${PR_URL##*/}" >> $GITHUB_OUTPUT
+          gh pr view --json labels | grep -q tensure-claude-bot || gh pr edit --add-label "tensure-claude-bot"
+          echo "PR_URL=$PR_URL" >> /tmp/pr_summary.txt
 
       - name: Attach Validation Evidence to PR
         id: attach-evidence
-        if: steps.eligibility.outputs.eligible == 'true'
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             const prNumber = '${{ steps.create-pr.outputs.pr_number }}';
+            if (!prNumber) return;
             const owner = context.repo.owner, repo = context.repo.repo;
             const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number: parseInt(prNumber) });
             if (comments.some(c => c.body?.includes('Claude: Validation Evidence'))) return;
-            const read = (f) => { try { return fs.readFileSync(f, 'utf8').slice(-3000); } catch(e) { return 'N/A'; } };
+            const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch(e) { return 'N/A'; } };
             const get = (k) => { try { return fs.readFileSync('/tmp/pr_summary.txt','utf8').split('\n').find(l=>l.startsWith(k+'='))?.split('=').slice(1).join('=')||'N/A'; } catch(e) { return 'N/A'; } };
             const e = s => s==='pass'?'✅':s==='not_run'||s==='N/A'?'⏭️':'❌';
             const uiBuild=get('UI_BUILD_STATUS'), uiTest=get('UI_TEST_STATUS'), uiTestOut=get('UI_TEST_OUTPUT');
             const uiCS=get('UI_COVERAGE_STATEMENTS'), uiCB=get('UI_COVERAGE_BRANCHES'), uiCF=get('UI_COVERAGE_FUNCTIONS'), uiCL=get('UI_COVERAGE_LINES');
             const apiTest=get('API_PYTEST_STATUS'), apiTestOut=get('API_PYTEST_OUTPUT'), apiCov=get('API_COVERAGE_TOTAL'), apiSmoke=get('API_FLASK_SMOKE');
+            const apiSmokeOut=get('API_FLASK_SMOKE_OUTPUT');
+            const maxLen = 60000;
+            const trim = (s) => s.length > maxLen ? '...(truncated for GitHub comment limit)\n' + s.slice(-maxLen) : s;
             await github.rest.issues.createComment({ owner, repo, issue_number: parseInt(prNumber), body:
               `## 🔍 Claude: Validation Evidence\n\n---\n\n` +
               `## 🖥️ React UI\n\n` +
-              `**Build** ${e(uiBuild)} **${uiBuild}**\n\`\`\`\n${read('/tmp/build_output.txt')}\n\`\`\`\n\n` +
-              `**Tests** ${e(uiTest)} **${uiTest}** — ${uiTestOut}\n\`\`\`\n${read('/tmp/test_output.txt')}\n\`\`\`\n\n` +
+              `**Build** ${e(uiBuild)} **${uiBuild}**\n\`\`\`\n${trim(read('/tmp/build_output.txt'))}\n\`\`\`\n\n` +
+              `**Tests** ${e(uiTest)} **${uiTest}** — ${uiTestOut}\n\`\`\`\n${trim(read('/tmp/test_output.txt'))}\n\`\`\`\n\n` +
               `**Coverage:** Statements ${uiCS} | Branches ${uiCB} | Functions ${uiCF} | Lines ${uiCL}\n\n---\n\n` +
               `## 🐍 Flask API\n\n` +
-              `**pytest** ${e(apiTest)} **${apiTest}** — ${apiTestOut}\n\`\`\`\n${read('/tmp/pytest_output.txt')}\n\`\`\`\n\n` +
-              `**Coverage:**\n\`\`\`\n${read('/tmp/coverage_output.txt')}\n\`\`\`\n\n` +
-              `**Smoke Test** ${e(apiSmoke)} **${apiSmoke}**\n\`\`\`\n${read('/tmp/flask_smoke.txt')}\n\`\`\`\n\n` +
-              `> ⚠️ Evidence posted by workflow fallback`
+              `**pytest** ${e(apiTest)} **${apiTest}** — ${apiTestOut}\n\`\`\`\n${trim(read('/tmp/pytest_output.txt'))}\n\`\`\`\n\n` +
+              `**Coverage:**\n\`\`\`\n${trim(read('/tmp/coverage_output.txt'))}\n\`\`\`\n\n` +
+              `**Smoke Test** ${e(apiSmoke)} **${apiSmoke}**\n\`\`\`\n${read('/tmp/flask_smoke.txt')}\n\`\`\`\n` +
+              `**Smoke output:** ${apiSmokeOut}\n\n` +
+              `> 🤖 Evidence attached by workflow`
             });
 
       - name: Post Success Comment
         id: post-success
-        if: steps.eligibility.outputs.eligible == 'true' && success()
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && success()
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -321,7 +461,7 @@ jobs:
 
       - name: Trigger Claude Review Workflow
         id: trigger-review
-        if: steps.eligibility.outputs.eligible == 'true' && success()
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && success()
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -350,7 +490,9 @@ jobs:
               'Create Branch':      '${{ steps.branch.outcome }}',
               'Get Existing Files': '${{ steps.existing-files.outcome }}',
               'Claude Implement':   '${{ steps.claude.outcome }}',
-              'Fallback PR':        '${{ steps.create-pr.outcome }}',
+              'Validate UI':        '${{ steps.validate-ui.outcome }}',
+              'Validate API':       '${{ steps.validate-api.outcome }}',
+              'Create PR':          '${{ steps.create-pr.outcome }}',
               'Attach Evidence':    '${{ steps.attach-evidence.outcome }}',
               'Post Success':       '${{ steps.post-success.outcome }}',
               'Trigger Review':     '${{ steps.trigger-review.outcome }}',
