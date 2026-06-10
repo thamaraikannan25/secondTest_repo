@@ -5,23 +5,28 @@ function greet(name) {
 }
 
 function add(a, b) {
+  if (typeof a !== "number" || typeof b !== "number") {
+    throw new TypeError("add: both arguments must be numbers");
+  }
   return a + b;
 }
 
 function multiply(a, b) {
+  if (typeof a !== "number" || typeof b !== "number") {
+    throw new TypeError("multiply: both arguments must be numbers");
+  }
   return a * b;
 }
 
 function getGreeting() {
-  const message = greet("World");
-  console.log(message);
-  return message;
+  return greet("World");
 }
 
 module.exports = { greet, add, multiply, getGreeting };
 
 if (require.main === module) {
-  getGreeting();
+  const message = getGreeting();
+  console.log(message);
   console.log("add(2, 3) =", add(2, 3));
   console.log("multiply(4, 5) =", multiply(4, 5));
 }
