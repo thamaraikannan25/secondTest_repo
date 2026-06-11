@@ -169,8 +169,102 @@ jobs:
           echo "$STATUS" > "$STATUS_FILE"
           echo "Synced loop ${LOOP_NUM} status: $STATUS"
           SCRIPT
-          chmod +x "$STATUS_DIR/read_status.sh" "$STATUS_DIR/sync_status.sh"
+          cat > "$STATUS_DIR/fetch_open_feedback.sh" << 'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          PR_NUMBER="$1"
+          REPO="$2"
+          OUTPUT="$3"
+          OWNER="${REPO%%/*}"
+          NAME="${REPO#*/}"
+
+          {
+            echo "# Open PR Feedback"
+            echo ""
+            echo "PR: ${REPO}#${PR_NUMBER}"
+            echo ""
+
+            echo "## Unresolved inline review threads"
+            THREADS=$(gh api graphql -f query='
+              query($owner: String!, $name: String!, $number: Int!) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $number) {
+                    reviewThreads(first: 100) {
+                      nodes {
+                        id
+                        isResolved
+                        isOutdated
+                        path
+                        line
+                        comments(first: 20) {
+                          nodes {
+                            body
+                            author { login }
+                            createdAt
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -f owner="$OWNER" -f name="$NAME" -F number="$PR_NUMBER" 2>/dev/null || echo '{}')
+
+            UNRESOLVED=$(echo "$THREADS" | jq '[.data.repository.pullRequest.reviewThreads.nodes[]? | select(.isResolved == false)]')
+            COUNT=$(echo "$UNRESOLVED" | jq 'length')
+
+            if [ "$COUNT" = "0" ]; then
+              echo "_No unresolved inline review threads._"
+            else
+              echo "$UNRESOLVED" | jq -r '.[] | "### Thread `\(.id)`\n- **File:** `\(.path)` line \(.line // "n/a")\n- **Outdated:** \(.isOutdated)\n**Comments:**\n" + (.comments.nodes | map("- **\(.author.login)** (\(.createdAt)): \(.body)") | join("\n")) + "\n"'
+            fi
+
+            echo ""
+            echo "## Recent human PR conversation comments"
+            HUMAN=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+              --jq '[.comments[-30:] | reverse | .[] | select(.author.login | test("bot|claude|github-actions"; "i") | not)]' 2>/dev/null || echo '[]')
+            HCOUNT=$(echo "$HUMAN" | jq 'length')
+
+            if [ "$HCOUNT" = "0" ]; then
+              echo "_No recent human conversation comments._"
+            else
+              echo "$HUMAN" | jq -r '.[] | "- **\(.author.login)** (\(.createdAt)): \(.body)\n"'
+            fi
+
+            echo ""
+            echo "## Summary"
+            echo "- Unresolved inline threads: ${COUNT}"
+            echo "- Recent human conversation comments: ${HCOUNT}"
+          } > "$OUTPUT"
+
+          echo "✅ Open feedback written to $OUTPUT"
+          SCRIPT
+          cat > "$STATUS_DIR/resolve_review_thread.sh" << 'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          THREAD_ID="$1"
+          if [ -z "$THREAD_ID" ]; then
+            echo "Usage: resolve_review_thread.sh PRRT_..." >&2
+            exit 1
+          fi
+
+          gh api graphql -f query="mutation { resolveReviewThread(input: {threadId: \"${THREAD_ID}\"}) { thread { id isResolved } } }"
+          echo "✅ Resolved thread ${THREAD_ID}"
+          SCRIPT
+          chmod +x "$STATUS_DIR/read_status.sh" "$STATUS_DIR/sync_status.sh" \
+            "$STATUS_DIR/fetch_open_feedback.sh" "$STATUS_DIR/resolve_review_thread.sh"
           echo "✅ Loop status directory: $STATUS_DIR"
+
+      - name: Fetch Open PR Feedback
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          "$CLAUDE_STATUS_DIR/fetch_open_feedback.sh" \
+            "${{ steps.pr-info.outputs.pr_number }}" \
+            "${{ github.repository }}" \
+            "$CLAUDE_STATUS_DIR/open_feedback.md"
+          cat "$CLAUDE_STATUS_DIR/open_feedback.md"
 
       # ─────────────────────────────────────────
       # LOOP 1 — Review + Fix
@@ -184,11 +278,14 @@ jobs:
           allowed_bots: '*'
           claude_args: >-
             --model claude-sonnet-4-6
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*),Bash(echo:*),Bash(mkdir:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(*fetch_open_feedback*),Bash(*resolve_review_thread*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*),Bash(echo:*),Bash(mkdir:*)"
           prompt: |
             You are a fully autonomous code reviewer and fixer. This is LOOP 1 of 3.
             PR Number: ${{ steps.pr-info.outputs.pr_number }}
+            Repository: ${{ github.repository }}
             Status file (MANDATORY): ${{ runner.temp }}/claude-review/loop1_status.txt
+            Open feedback file: ${{ runner.temp }}/claude-review/open_feedback.md
+            Resolve thread script: ${{ runner.temp }}/claude-review/resolve_review_thread.sh
 
             ## STRICT RULES:
             - NEVER ask developer to fix anything
@@ -197,11 +294,20 @@ jobs:
             - Read domain files before making any fixes
             - ALWAYS write the loop status file as the FINAL action (required for workflow control)
             - Status file must contain exactly one line: either "ISSUES_FIXED" or "ALL_CLEAR"
+            - Human reviewer feedback and unresolved threads take priority over your own review findings
+
+            ## STEP 0 — OPEN FEEDBACK (MANDATORY FIRST):
+            - Read: ${{ runner.temp }}/claude-review/open_feedback.md
+            - Refresh if needed: ${{ runner.temp }}/claude-review/fetch_open_feedback.sh ${{ steps.pr-info.outputs.pr_number }} ${{ github.repository }} ${{ runner.temp }}/claude-review/open_feedback.md
+            - Address EVERY unresolved inline review thread and human conversation comment
+            - For each thread you fix: reply briefly, then resolve with:
+              ${{ runner.temp }}/claude-review/resolve_review_thread.sh PRRT_...
+            - If open feedback exists, you MUST fix it — do not post All Clear until threads are resolved or legitimately cannot be fixed
 
             ## STEP 1 — REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
             - Review all changed files for bugs, security, quality, dead code, missing tests
-            - Post inline comments on every problem line
+            - Post inline comments on every NEW problem line (do not duplicate existing open threads)
             - Post comment:
               "## 🔍 Claude Review — Loop 1/3
                Found **X issue(s)**:
@@ -215,13 +321,15 @@ jobs:
             - Missing tests → write proper tests using domain values
             - Bugs → fix directly
             - git add . && git commit -m "fix: claude loop 1 — [fixes]" && git push
+            - Resolve all addressed review threads (see STEP 0)
             - Post comment:
               "## 🔧 Auto-Fix Applied — Loop 1/3
                Fixed: [list fixes]
+               Resolved threads: [list thread IDs or 'none']
                🔄 Loop 2 will re-review..."
             - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_FIXED" > "${{ runner.temp }}/claude-review/loop1_status.txt"
 
-            ## IF NO ISSUES FOUND:
+            ## IF NO ISSUES FOUND (and no unresolved open feedback):
             - Post comment:
               "## ✅ All Clear after Loop 1/3 — No issues found!
                👨‍💻 Code review passed (no review fixes applied)."
@@ -249,6 +357,16 @@ jobs:
       # ─────────────────────────────────────────
       # LOOP 2 — Review + Fix (only if loop 1 had issues)
       # ─────────────────────────────────────────
+      - name: Refresh Open PR Feedback
+        if: steps.check1.outputs.status != 'ALL_CLEAR'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          "$CLAUDE_STATUS_DIR/fetch_open_feedback.sh" \
+            "${{ steps.pr-info.outputs.pr_number }}" \
+            "${{ github.repository }}" \
+            "$CLAUDE_STATUS_DIR/open_feedback.md"
+
       - name: Claude Loop 2 — Re-Review & Fix
         id: loop2
         if: steps.check1.outputs.status != 'ALL_CLEAR'
@@ -259,12 +377,15 @@ jobs:
           allowed_bots: '*'
           claude_args: >-
             --model claude-sonnet-4-6
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*),Bash(echo:*),Bash(mkdir:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(*fetch_open_feedback*),Bash(*resolve_review_thread*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*),Bash(echo:*),Bash(mkdir:*)"
           prompt: |
             You are a fully autonomous code reviewer and fixer. This is LOOP 2 of 3.
             PR Number: ${{ steps.pr-info.outputs.pr_number }}
+            Repository: ${{ github.repository }}
             Loop 1 already applied fixes — re-review now.
             Status file (MANDATORY): ${{ runner.temp }}/claude-review/loop2_status.txt
+            Open feedback file: ${{ runner.temp }}/claude-review/open_feedback.md
+            Resolve thread script: ${{ runner.temp }}/claude-review/resolve_review_thread.sh
 
             ## STRICT RULES:
             - NEVER ask developer to fix anything
@@ -272,11 +393,17 @@ jobs:
             - You MAY delete files listed in /tmp/new_files.txt if problematic
             - ALWAYS write the loop status file as the FINAL action (required for workflow control)
             - Status file must contain exactly one line: either "ISSUES_FIXED" or "ALL_CLEAR"
+            - Resolve all addressed review threads before finishing
+
+            ## STEP 0 — OPEN FEEDBACK (MANDATORY FIRST):
+            - Read: ${{ runner.temp }}/claude-review/open_feedback.md
+            - Fix and resolve any remaining unresolved inline threads and human comments
+            - Use: ${{ runner.temp }}/claude-review/resolve_review_thread.sh PRRT_...
 
             ## STEP 1 — RE-REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
             - Review ALL changed files again carefully
-            - Post inline comments on any remaining problem lines
+            - Post inline comments on any remaining NEW problem lines
             - Post comment:
               "## 🔍 Claude Re-Review — Loop 2/3
                Found **X issue(s)** remaining:
@@ -286,13 +413,15 @@ jobs:
             ## STEP 2 — FIX (if issues found):
             - Fix ALL remaining issues
             - git add . && git commit -m "fix: claude loop 2 — [fixes]" && git push
+            - Resolve all addressed review threads
             - Post comment:
               "## 🔧 Auto-Fix Applied — Loop 2/3
                Fixed: [list fixes]
+               Resolved threads: [list thread IDs or 'none']
                🔄 Loop 3 will re-review..."
             - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_FIXED" > "${{ runner.temp }}/claude-review/loop2_status.txt"
 
-            ## IF NO ISSUES FOUND:
+            ## IF NO ISSUES FOUND (and no unresolved open feedback):
             - Post comment:
               "## ✅ All Clear after Loop 2/3 — All issues resolved!
                👨‍💻 PR is ready for your review and approval."
@@ -321,6 +450,18 @@ jobs:
       # ─────────────────────────────────────────
       # LOOP 3 — Final Review
       # ─────────────────────────────────────────
+      - name: Refresh Open PR Feedback (Loop 3)
+        if: |
+          steps.check1.outputs.status != 'ALL_CLEAR' &&
+          steps.check2.outputs.status != 'ALL_CLEAR'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          "$CLAUDE_STATUS_DIR/fetch_open_feedback.sh" \
+            "${{ steps.pr-info.outputs.pr_number }}" \
+            "${{ github.repository }}" \
+            "$CLAUDE_STATUS_DIR/open_feedback.md"
+
       - name: Claude Loop 3 — Final Review
         if: |
           steps.check1.outputs.status != 'ALL_CLEAR' &&
@@ -332,12 +473,15 @@ jobs:
           allowed_bots: '*'
           claude_args: >-
             --model claude-sonnet-4-6
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*),Bash(echo:*),Bash(mkdir:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(*fetch_open_feedback*),Bash(*resolve_review_thread*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*),Bash(echo:*),Bash(mkdir:*)"
           prompt: |
             You are a fully autonomous code reviewer and fixer. This is LOOP 3 of 3 — FINAL LOOP.
             PR Number: ${{ steps.pr-info.outputs.pr_number }}
+            Repository: ${{ github.repository }}
             Loops 1 and 2 already applied fixes — do one final review and fix attempt.
             Status file (MANDATORY): ${{ runner.temp }}/claude-review/loop3_status.txt
+            Open feedback file: ${{ runner.temp }}/claude-review/open_feedback.md
+            Resolve thread script: ${{ runner.temp }}/claude-review/resolve_review_thread.sh
 
             ## STRICT RULES:
             - NEVER ask developer to fix anything
@@ -346,21 +490,29 @@ jobs:
             - This is the LAST loop — fix everything possible
             - ALWAYS write the loop status file as the FINAL action (required for workflow control)
             - Status file must contain exactly one line: either "ALL_CLEAR" or "ISSUES_REMAIN"
+            - Resolve all addressed review threads before finishing
+
+            ## STEP 0 — OPEN FEEDBACK (MANDATORY FIRST):
+            - Read: ${{ runner.temp }}/claude-review/open_feedback.md
+            - Fix and resolve any remaining unresolved inline threads and human comments
+            - Use: ${{ runner.temp }}/claude-review/resolve_review_thread.sh PRRT_...
 
             ## STEP 1 — FINAL REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
             - Review ALL changed files one final time
-            - Post inline comments on any remaining issues
+            - Post inline comments on any remaining NEW issues
 
             ## STEP 2 — FINAL FIX (if issues found):
             - Fix everything possible
             - git add . && git commit -m "fix: claude loop 3 — [fixes]" && git push
+            - Resolve all addressed review threads
 
-            ## IF ZERO ISSUES AFTER FINAL FIX:
+            ## IF ZERO ISSUES AFTER FINAL FIX (and no unresolved open feedback):
             - Post this comment:
               "## ✅ Claude Review Complete — All Clear!
                All issues resolved across 3 loops.
                **All fixes applied:** [complete list]
+               **Resolved threads:** [list thread IDs or 'none']
                👨‍💻 PR is ready for your review and approval."
             - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ALL_CLEAR" > "${{ runner.temp }}/claude-review/loop3_status.txt"
 
@@ -368,6 +520,7 @@ jobs:
             - Post this comment:
               "## ⚠️ Claude Review — 3 Loops Completed
                **Auto-fixed:** [list everything fixed in loops 1, 2 and 3]
+               **Unresolved threads:** [list thread IDs still open]
                **Still requires attention:** [list remaining issues with filename and line]
                🔍 **These issues need developer review before merging.**"
             - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_REMAIN" > "${{ runner.temp }}/claude-review/loop3_status.txt"
