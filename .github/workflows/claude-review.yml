@@ -216,7 +216,8 @@ jobs:
             if [ "$COUNT" = "0" ]; then
               echo "_No unresolved inline review threads._"
             else
-              echo "$UNRESOLVED" | jq -r '.[] | "### Thread `\(.id)`\n- **File:** `\(.path)` line \(.line // "n/a")\n- **Outdated:** \(.isOutdated)\n**Comments:**\n" + (.comments.nodes | map("- **\(.author.login)** (\(.createdAt)): \(.body)") | join("\n")) + "\n"'
+              # Prominently prefix each thread ID so Claude cannot miss it
+              echo "$UNRESOLVED" | jq -r '.[] | "### ⚠️ RESOLVE_THIS_THREAD_ID: \(.id)\n- **File:** `\(.path)` line \(.line // "n/a")\n- **Outdated:** \(.isOutdated)\n**Comments:**\n" + (.comments.nodes | map("- **\(.author.login)** (\(.createdAt)): \(.body)") | join("\n")) + "\n"'
             fi
 
             echo ""
@@ -235,13 +236,20 @@ jobs:
             echo "## Summary"
             echo "- Unresolved inline threads: ${COUNT}"
             echo "- Recent human conversation comments: ${HCOUNT}"
+            if [ "$COUNT" -gt "0" ]; then
+              echo ""
+              echo "## ❌ BLOCKING: You MUST fix and resolve all $COUNT thread(s) above before posting All Clear."
+            fi
           } > "$OUTPUT"
 
           echo "✅ Open feedback written to $OUTPUT"
           SCRIPT
+          # FIX: export GH_TOKEN so gh api graphql works when Claude calls this script
           cat > "$STATUS_DIR/resolve_review_thread.sh" << 'SCRIPT'
           #!/usr/bin/env bash
           set -euo pipefail
+
+          export GH_TOKEN="${GH_TOKEN:-$(gh auth token 2>/dev/null)}"
 
           THREAD_ID="$1"
           if [ -z "$THREAD_ID" ]; then
@@ -288,21 +296,26 @@ jobs:
             Resolve thread script: ${{ runner.temp }}/claude-review/resolve_review_thread.sh
 
             ## STRICT RULES:
-            - NEVER ask developer to fix anything
+            - NEVER ask developer to fix anything — you fix everything yourself
             - NEVER delete files listed in /tmp/existing_files.txt
             - You MAY delete files listed in /tmp/new_files.txt if problematic
             - Read domain files before making any fixes
             - ALWAYS write the loop status file as the FINAL action (required for workflow control)
             - Status file must contain exactly one line: either "ISSUES_FIXED" or "ALL_CLEAR"
-            - Human reviewer feedback and unresolved threads take priority over your own review findings
+            - Human reviewer feedback and unresolved threads are BLOCKING — they take absolute priority
 
-            ## STEP 0 — OPEN FEEDBACK (MANDATORY FIRST):
-            - Read: ${{ runner.temp }}/claude-review/open_feedback.md
-            - Refresh if needed: ${{ runner.temp }}/claude-review/fetch_open_feedback.sh ${{ steps.pr-info.outputs.pr_number }} ${{ github.repository }} ${{ runner.temp }}/claude-review/open_feedback.md
-            - Address EVERY unresolved inline review thread and human conversation comment
-            - For each thread you fix: reply briefly, then resolve with:
-              ${{ runner.temp }}/claude-review/resolve_review_thread.sh PRRT_...
-            - If open feedback exists, you MUST fix it — do not post All Clear until threads are resolved or legitimately cannot be fixed
+            ## STEP 0 — OPEN FEEDBACK (MANDATORY — DO THIS FIRST BEFORE ANYTHING ELSE):
+            1. Read the file: ${{ runner.temp }}/claude-review/open_feedback.md
+            2. Check the Summary section at the bottom: "Unresolved inline threads: N"
+            3. If N > 0, this is BLOCKING — you MUST address every thread marked "⚠️ RESOLVE_THIS_THREAD_ID: PRRT_..."
+               For each thread:
+               a. Read the file and line it refers to
+               b. Apply the requested change directly (e.g. "remove the line space" means delete that blank line)
+               c. Commit and push the fix: git add . && git commit -m "fix: address review thread — [description]" && git push
+               d. Resolve the thread: GH_TOKEN=$GH_TOKEN ${{ runner.temp }}/claude-review/resolve_review_thread.sh PRRT_xxxxx
+            4. Also address any human conversation comments listed under "Recent human PR conversation comments"
+            5. Do NOT proceed to STEP 1 until every thread is resolved or confirmed unresolvable
+            6. Do NOT post "All Clear" if any thread is still unresolved
 
             ## STEP 1 — REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
@@ -321,7 +334,7 @@ jobs:
             - Missing tests → write proper tests using domain values
             - Bugs → fix directly
             - git add . && git commit -m "fix: claude loop 1 — [fixes]" && git push
-            - Resolve all addressed review threads (see STEP 0)
+            - Resolve all addressed review threads
             - Post comment:
               "## 🔧 Auto-Fix Applied — Loop 1/3
                Fixed: [list fixes]
@@ -329,7 +342,7 @@ jobs:
                🔄 Loop 2 will re-review..."
             - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_FIXED" > "${{ runner.temp }}/claude-review/loop1_status.txt"
 
-            ## IF NO ISSUES FOUND (and no unresolved open feedback):
+            ## IF NO ISSUES FOUND AND ZERO UNRESOLVED THREADS:
             - Post comment:
               "## ✅ All Clear after Loop 1/3 — No issues found!
                👨‍💻 Code review passed (no review fixes applied)."
@@ -388,17 +401,24 @@ jobs:
             Resolve thread script: ${{ runner.temp }}/claude-review/resolve_review_thread.sh
 
             ## STRICT RULES:
-            - NEVER ask developer to fix anything
+            - NEVER ask developer to fix anything — you fix everything yourself
             - NEVER delete files listed in /tmp/existing_files.txt
             - You MAY delete files listed in /tmp/new_files.txt if problematic
             - ALWAYS write the loop status file as the FINAL action (required for workflow control)
             - Status file must contain exactly one line: either "ISSUES_FIXED" or "ALL_CLEAR"
-            - Resolve all addressed review threads before finishing
+            - Human reviewer feedback and unresolved threads are BLOCKING
 
-            ## STEP 0 — OPEN FEEDBACK (MANDATORY FIRST):
-            - Read: ${{ runner.temp }}/claude-review/open_feedback.md
-            - Fix and resolve any remaining unresolved inline threads and human comments
-            - Use: ${{ runner.temp }}/claude-review/resolve_review_thread.sh PRRT_...
+            ## STEP 0 — OPEN FEEDBACK (MANDATORY — DO THIS FIRST BEFORE ANYTHING ELSE):
+            1. Read the file: ${{ runner.temp }}/claude-review/open_feedback.md
+            2. Check the Summary section: "Unresolved inline threads: N"
+            3. If N > 0, address every thread marked "⚠️ RESOLVE_THIS_THREAD_ID: PRRT_..."
+               For each thread:
+               a. Read the file and line it refers to
+               b. Apply the requested change directly
+               c. Commit and push: git add . && git commit -m "fix: address review thread — [description]" && git push
+               d. Resolve: GH_TOKEN=$GH_TOKEN ${{ runner.temp }}/claude-review/resolve_review_thread.sh PRRT_xxxxx
+            4. Also address any human conversation comments
+            5. Do NOT post "All Clear" if any thread is still unresolved
 
             ## STEP 1 — RE-REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
@@ -421,7 +441,7 @@ jobs:
                🔄 Loop 3 will re-review..."
             - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_FIXED" > "${{ runner.temp }}/claude-review/loop2_status.txt"
 
-            ## IF NO ISSUES FOUND (and no unresolved open feedback):
+            ## IF NO ISSUES FOUND AND ZERO UNRESOLVED THREADS:
             - Post comment:
               "## ✅ All Clear after Loop 2/3 — All issues resolved!
                👨‍💻 PR is ready for your review and approval."
@@ -484,18 +504,25 @@ jobs:
             Resolve thread script: ${{ runner.temp }}/claude-review/resolve_review_thread.sh
 
             ## STRICT RULES:
-            - NEVER ask developer to fix anything
+            - NEVER ask developer to fix anything — you fix everything yourself
             - NEVER delete files listed in /tmp/existing_files.txt
             - You MAY delete files listed in /tmp/new_files.txt if problematic
             - This is the LAST loop — fix everything possible
             - ALWAYS write the loop status file as the FINAL action (required for workflow control)
             - Status file must contain exactly one line: either "ALL_CLEAR" or "ISSUES_REMAIN"
-            - Resolve all addressed review threads before finishing
+            - Human reviewer feedback and unresolved threads are BLOCKING
 
-            ## STEP 0 — OPEN FEEDBACK (MANDATORY FIRST):
-            - Read: ${{ runner.temp }}/claude-review/open_feedback.md
-            - Fix and resolve any remaining unresolved inline threads and human comments
-            - Use: ${{ runner.temp }}/claude-review/resolve_review_thread.sh PRRT_...
+            ## STEP 0 — OPEN FEEDBACK (MANDATORY — DO THIS FIRST BEFORE ANYTHING ELSE):
+            1. Read the file: ${{ runner.temp }}/claude-review/open_feedback.md
+            2. Check the Summary section: "Unresolved inline threads: N"
+            3. If N > 0, address every thread marked "⚠️ RESOLVE_THIS_THREAD_ID: PRRT_..."
+               For each thread:
+               a. Read the file and line it refers to
+               b. Apply the requested change directly
+               c. Commit and push: git add . && git commit -m "fix: address review thread — [description]" && git push
+               d. Resolve: GH_TOKEN=$GH_TOKEN ${{ runner.temp }}/claude-review/resolve_review_thread.sh PRRT_xxxxx
+            4. Also address any human conversation comments
+            5. Do NOT post "All Clear" if any thread is still unresolved
 
             ## STEP 1 — FINAL REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
@@ -507,7 +534,7 @@ jobs:
             - git add . && git commit -m "fix: claude loop 3 — [fixes]" && git push
             - Resolve all addressed review threads
 
-            ## IF ZERO ISSUES AFTER FINAL FIX (and no unresolved open feedback):
+            ## IF ZERO ISSUES AND ZERO UNRESOLVED THREADS:
             - Post this comment:
               "## ✅ Claude Review Complete — All Clear!
                All issues resolved across 3 loops.
