@@ -1,7 +1,7 @@
 # secondTest_repo
 
-## Setup Firestore document
+## Setup Firestore Emulator
 
 For instructions on setting up the Firestore Emulator in your local environment, refer to the following guide:
 
-[Setup Firestore Emulator in local](https://tensure.atlassian.net/wiki/spaces/Applaunche1/pages/82313217/Setup+Firestore+Emulator+in+local)
+[Setup Firestore Emulator Locally](https://tensure.atlassian.net/wiki/spaces/Applaunche1/pages/82313217/Setup+Firestore+Emulator+in+local)
