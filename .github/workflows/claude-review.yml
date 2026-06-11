@@ -136,11 +136,11 @@ jobs:
 
           ALL_CLEAR_MARKER="All Clear after Loop ${LOOP_NUM}/3"
           FIX_MARKER="Auto-Fix Applied — Loop ${LOOP_NUM}/3"
-          if [ "$LOOP_NUM" = "1" ]; then
-            REVIEW_MARKER="Claude Review — Loop 1/3"
-          else
-            REVIEW_MARKER="Claude Re-Review — Loop 2/3"
-          fi
+
+          # NOTE: REVIEW_MARKER is intentionally not used here.
+          # Claude always posts a review comment even when finding 0 issues,
+          # so matching it would incorrectly override ALL_CLEAR to ISSUES_FIXED.
+          # Only FIX_MARKER (explicit fix applied) and ALL_CLEAR_MARKER are reliable signals.
 
           # Newest matching comment wins (avoids stale All Clear from earlier runs)
           for body in "${COMMENT_BODIES[@]}"; do
@@ -149,10 +149,6 @@ jobs:
               exit 0
             fi
             if [[ "$body" == *"$FIX_MARKER"* ]]; then
-              echo "ISSUES_FIXED"
-              exit 0
-            fi
-            if [[ "$body" == *"$REVIEW_MARKER"* ]]; then
               echo "ISSUES_FIXED"
               exit 0
             fi
@@ -263,9 +259,10 @@ jobs:
             echo "- Outdated threads (code may not be fixed): ${OUTDATED_COUNT}"
             echo "- Total human review requests to verify: ${ALL_HUMAN_COUNT}"
             echo "- Recent human conversation comments: ${HCOUNT}"
-            if [ "$COUNT" -gt "0" ] || [ "$ALL_HUMAN_COUNT" -gt "0" ]; then
+            if [ "$COUNT" -gt "0" ] || [ "$ALL_HUMAN_COUNT" -gt "0" ] || [ "$HCOUNT" -gt "0" ]; then
               echo ""
-              echo "## ❌ BLOCKING: You MUST verify ALL human review requests above are applied in code before posting All Clear."
+              echo "## ❌ BLOCKING: You MUST address ALL items above before posting All Clear."
+              echo "## ❌ This includes conversation comments — they are required changes, not suggestions."
               echo "## ❌ Even if threads appear resolved/outdated, open each referenced file and confirm the change exists."
             fi
           } > "$OUTPUT"
@@ -343,20 +340,26 @@ jobs:
             - ALWAYS write the loop status file as the FINAL action (required for workflow control)
             - Status file must contain exactly one line: either "ISSUES_FIXED" or "ALL_CLEAR"
             - Human reviewer feedback and unresolved threads are BLOCKING — they take absolute priority
+            - A human conversation comment is a REQUIRED CHANGE — not a suggestion, not informational
+            - "All Clear" is only valid when review threads, reviewer requests AND conversation comments are ALL zero
 
             ## STEP 0 — READ CONTEXT AND FIX REVIEWER REQUESTS (DO THIS FIRST):
             Run this command right now: cat /tmp/claude_task_context.md
             This file contains all human review requests pre-fetched for you.
 
-            Then for EVERY item listed under "📝 Review request" or "RESOLVE_THIS_THREAD_ID":
+            Check the Summary section at the bottom:
+            - If "Recent human conversation comments" > 0 — those are REQUIRED CHANGES, apply them now
+            - If "Total human review requests to verify" > 0 — verify each is applied in the file
+
+            For EVERY item listed under "📝 Review request", "RESOLVE_THIS_THREAD_ID", or "Recent human PR conversation comments":
             a. Run: cat <the exact File path shown in that entry>
             b. Check whether the requested change (e.g. "remove the line space") is present in the file
             c. If the change is NOT present — edit the file and apply it now
             d. After applying all changes: git add . && git commit -m "fix: apply reviewer requests" && git push origin ${{ steps.pr-info.outputs.branch }}
             e. For each thread ID shown: ${{ runner.temp }}/claude-review/resolve_review_thread.sh <THREAD_ID>
 
-            Do NOT move to STEP 1 until every reviewer request has been verified in the actual file content.
-            Do NOT post All Clear if any human-requested change is missing from the file.
+            Do NOT move to STEP 1 until every reviewer request AND every conversation comment has been applied.
+            Do NOT post All Clear if "Recent human conversation comments" > 0 and you have not acted on them.
 
             ## STEP 1 — REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
@@ -383,7 +386,7 @@ jobs:
                🔄 Loop 2 will re-review..."
             - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_FIXED" > "${{ runner.temp }}/claude-review/loop1_status.txt"
 
-            ## IF NO ISSUES FOUND AND ZERO UNRESOLVED THREADS:
+            ## IF NO ISSUES FOUND AND ALL COUNTS ARE ZERO:
             - Post comment:
               "## ✅ All Clear after Loop 1/3 — No issues found!
                👨‍💻 Code review passed (no review fixes applied)."
@@ -450,12 +453,18 @@ jobs:
             - ALWAYS write the loop status file as the FINAL action (required for workflow control)
             - Status file must contain exactly one line: either "ISSUES_FIXED" or "ALL_CLEAR"
             - Human reviewer feedback and unresolved threads are BLOCKING
+            - A human conversation comment is a REQUIRED CHANGE — not a suggestion, not informational
+            - "All Clear" is only valid when review threads, reviewer requests AND conversation comments are ALL zero
 
             ## STEP 0 — READ CONTEXT AND FIX REVIEWER REQUESTS (DO THIS FIRST):
             Run this command right now: cat /tmp/claude_task_context.md
             This file contains all human review requests pre-fetched for you.
 
-            Then for EVERY item listed under "📝 Review request" or "RESOLVE_THIS_THREAD_ID":
+            Check the Summary section at the bottom:
+            - If "Recent human conversation comments" > 0 — those are REQUIRED CHANGES, apply them now
+            - If "Total human review requests to verify" > 0 — verify each is applied in the file
+
+            For EVERY item listed under "📝 Review request", "RESOLVE_THIS_THREAD_ID", or "Recent human PR conversation comments":
             a. Run: cat <the exact File path shown in that entry>
             b. Check whether the requested change is present in the file
             c. If the change is NOT present — edit the file and apply it now
@@ -485,7 +494,7 @@ jobs:
                🔄 Loop 3 will re-review..."
             - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_FIXED" > "${{ runner.temp }}/claude-review/loop2_status.txt"
 
-            ## IF NO ISSUES FOUND AND ZERO UNRESOLVED THREADS:
+            ## IF NO ISSUES FOUND AND ALL COUNTS ARE ZERO:
             - Post comment:
               "## ✅ All Clear after Loop 2/3 — All issues resolved!
                👨‍💻 PR is ready for your review and approval."
@@ -557,12 +566,18 @@ jobs:
             - ALWAYS write the loop status file as the FINAL action (required for workflow control)
             - Status file must contain exactly one line: either "ALL_CLEAR" or "ISSUES_REMAIN"
             - Human reviewer feedback and unresolved threads are BLOCKING
+            - A human conversation comment is a REQUIRED CHANGE — not a suggestion, not informational
+            - "All Clear" is only valid when review threads, reviewer requests AND conversation comments are ALL zero
 
             ## STEP 0 — READ CONTEXT AND FIX REVIEWER REQUESTS (DO THIS FIRST):
             Run this command right now: cat /tmp/claude_task_context.md
             This file contains all human review requests pre-fetched for you.
 
-            Then for EVERY item listed under "📝 Review request" or "RESOLVE_THIS_THREAD_ID":
+            Check the Summary section at the bottom:
+            - If "Recent human conversation comments" > 0 — those are REQUIRED CHANGES, apply them now
+            - If "Total human review requests to verify" > 0 — verify each is applied in the file
+
+            For EVERY item listed under "📝 Review request", "RESOLVE_THIS_THREAD_ID", or "Recent human PR conversation comments":
             a. Run: cat <the exact File path shown in that entry>
             b. Check whether the requested change is present in the file
             c. If the change is NOT present — edit the file and apply it now
@@ -581,7 +596,7 @@ jobs:
             - git add . && git commit -m "fix: claude loop 3 — [fixes]" && git push
             - Resolve all addressed review threads
 
-            ## IF ZERO ISSUES AND ZERO UNRESOLVED THREADS:
+            ## IF ZERO ISSUES AND ALL COUNTS ARE ZERO:
             - Post this comment:
               "## ✅ Claude Review Complete — All Clear!
                All issues resolved across 3 loops.
