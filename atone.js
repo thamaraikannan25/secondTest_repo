@@ -1,6 +1,9 @@
 // atone.js - Sample file demonstrating basic JavaScript functionality
 
 function greet(name) {
+  if (typeof name !== "string") {
+    throw new TypeError("greet: name must be a string");
+  }
   return `Hello, ${name}! Welcome to atone.js.`;
 }
 

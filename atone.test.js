@@ -5,6 +5,9 @@ const { greet, add, multiply, getGreeting } = require("./atone");
 assert.strictEqual(greet("World"), "Hello, World! Welcome to atone.js.");
 assert.strictEqual(greet("Alice"), "Hello, Alice! Welcome to atone.js.");
 assert.strictEqual(greet(""), "Hello, ! Welcome to atone.js.");
+assert.throws(() => greet(null), TypeError);
+assert.throws(() => greet(undefined), TypeError);
+assert.throws(() => greet(123), TypeError);
 
 // add
 assert.strictEqual(add(2, 3), 5);
