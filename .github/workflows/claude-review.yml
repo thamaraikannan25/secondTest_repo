@@ -85,6 +85,93 @@ jobs:
           echo "=== New files ===" && cat /tmp/new_files.txt
           echo "=== Existing files ===" && cat /tmp/existing_files.txt
 
+      - name: Prepare Loop Status Directory
+        run: |
+          STATUS_DIR="${RUNNER_TEMP}/claude-review"
+          echo "CLAUDE_STATUS_DIR=${STATUS_DIR}" >> "$GITHUB_ENV"
+          mkdir -p "$STATUS_DIR"
+          cat > "$STATUS_DIR/read_status.sh" << 'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          LOOP_NUM="$1"
+          STATUS_FILE="$2"
+          PR_NUMBER="$3"
+          REPO="$4"
+          DEFAULT_STATUS="$5"
+
+          if [ -f "$STATUS_FILE" ]; then
+            tr -d '[:space:]' < "$STATUS_FILE"
+            exit 0
+          fi
+
+          echo "⚠️ Status file missing ($STATUS_FILE) — checking latest PR comments" >&2
+
+          mapfile -t COMMENT_BODIES < <(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+            --jq '.comments[-20:] | reverse | .[].body' 2>/dev/null || true)
+
+          if [ "$LOOP_NUM" = "3" ]; then
+            for body in "${COMMENT_BODIES[@]}"; do
+              if [[ "$body" == *"Claude Review Complete — All Clear!"* ]]; then
+                echo "ALL_CLEAR"
+                exit 0
+              fi
+              if [[ "$body" == *"Claude Review — 3 Loops Completed"* ]]; then
+                echo "ISSUES_REMAIN"
+                exit 0
+              fi
+            done
+            echo "$DEFAULT_STATUS"
+            exit 0
+          fi
+
+          ALL_CLEAR_MARKER="All Clear after Loop ${LOOP_NUM}/3"
+          FIX_MARKER="Auto-Fix Applied — Loop ${LOOP_NUM}/3"
+          if [ "$LOOP_NUM" = "1" ]; then
+            REVIEW_MARKER="Claude Review — Loop 1/3"
+          else
+            REVIEW_MARKER="Claude Re-Review — Loop 2/3"
+          fi
+
+          # Newest matching comment wins (avoids stale All Clear from earlier runs)
+          for body in "${COMMENT_BODIES[@]}"; do
+            if [[ "$body" == *"$ALL_CLEAR_MARKER"* ]]; then
+              echo "ALL_CLEAR"
+              exit 0
+            fi
+            if [[ "$body" == *"$FIX_MARKER"* ]]; then
+              echo "ISSUES_FIXED"
+              exit 0
+            fi
+            if [[ "$body" == *"$REVIEW_MARKER"* ]]; then
+              echo "ISSUES_FIXED"
+              exit 0
+            fi
+          done
+
+          echo "$DEFAULT_STATUS"
+          SCRIPT
+          cat > "$STATUS_DIR/sync_status.sh" << 'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          LOOP_NUM="$1"
+          STATUS_FILE="$2"
+          PR_NUMBER="$3"
+          REPO="$4"
+          DEFAULT_STATUS="$5"
+          READ_STATUS_SCRIPT="$6"
+
+          # Always resolve from latest PR comments (Claude often skips the status file)
+          STATUS=$("$READ_STATUS_SCRIPT" "$LOOP_NUM" "/dev/null/claude-status-pending" \
+            "$PR_NUMBER" "$REPO" "$DEFAULT_STATUS")
+
+          echo "$STATUS" > "$STATUS_FILE"
+          echo "Synced loop ${LOOP_NUM} status: $STATUS"
+          SCRIPT
+          chmod +x "$STATUS_DIR/read_status.sh" "$STATUS_DIR/sync_status.sh"
+          echo "✅ Loop status directory: $STATUS_DIR"
+
       # ─────────────────────────────────────────
       # LOOP 1 — Review + Fix
       # ─────────────────────────────────────────
@@ -97,17 +184,19 @@ jobs:
           allowed_bots: '*'
           claude_args: >-
             --model claude-sonnet-4-6
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*),Bash(echo:*),Bash(mkdir:*)"
           prompt: |
             You are a fully autonomous code reviewer and fixer. This is LOOP 1 of 3.
             PR Number: ${{ steps.pr-info.outputs.pr_number }}
+            Status file (MANDATORY): ${{ runner.temp }}/claude-review/loop1_status.txt
 
             ## STRICT RULES:
             - NEVER ask developer to fix anything
             - NEVER delete files listed in /tmp/existing_files.txt
             - You MAY delete files listed in /tmp/new_files.txt if problematic
             - Read domain files before making any fixes
-            - Write result to /tmp/loop1_status.txt → either "ISSUES_FIXED" or "ALL_CLEAR"
+            - ALWAYS write the loop status file as the FINAL action (required for workflow control)
+            - Status file must contain exactly one line: either "ISSUES_FIXED" or "ALL_CLEAR"
 
             ## STEP 1 — REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
@@ -130,18 +219,30 @@ jobs:
               "## 🔧 Auto-Fix Applied — Loop 1/3
                Fixed: [list fixes]
                🔄 Loop 2 will re-review..."
-            - Write "ISSUES_FIXED" to /tmp/loop1_status.txt
+            - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_FIXED" > "${{ runner.temp }}/claude-review/loop1_status.txt"
 
             ## IF NO ISSUES FOUND:
             - Post comment:
               "## ✅ All Clear after Loop 1/3 — No issues found!
                👨‍💻 Code review passed (no review fixes applied)."
-            - Write "ALL_CLEAR" to /tmp/loop1_status.txt
+            - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ALL_CLEAR" > "${{ runner.temp }}/claude-review/loop1_status.txt"
+
+      - name: Sync Loop 1 Status
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          "$CLAUDE_STATUS_DIR/sync_status.sh" 1 \
+            "$CLAUDE_STATUS_DIR/loop1_status.txt" \
+            "${{ steps.pr-info.outputs.pr_number }}" \
+            "${{ github.repository }}" \
+            "ALL_CLEAR" \
+            "$CLAUDE_STATUS_DIR/read_status.sh"
 
       - name: Check Loop 1 Status
         id: check1
         run: |
-          STATUS=$(cat /tmp/loop1_status.txt 2>/dev/null || echo "ISSUES_FIXED")
+          STATUS=$(tr -d '[:space:]' < "$CLAUDE_STATUS_DIR/loop1_status.txt")
           echo "status=$STATUS" >> $GITHUB_OUTPUT
           echo "Loop 1 status: $STATUS"
 
@@ -158,17 +259,19 @@ jobs:
           allowed_bots: '*'
           claude_args: >-
             --model claude-sonnet-4-6
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*),Bash(echo:*),Bash(mkdir:*)"
           prompt: |
             You are a fully autonomous code reviewer and fixer. This is LOOP 2 of 3.
             PR Number: ${{ steps.pr-info.outputs.pr_number }}
             Loop 1 already applied fixes — re-review now.
+            Status file (MANDATORY): ${{ runner.temp }}/claude-review/loop2_status.txt
 
             ## STRICT RULES:
             - NEVER ask developer to fix anything
             - NEVER delete files listed in /tmp/existing_files.txt
             - You MAY delete files listed in /tmp/new_files.txt if problematic
-            - Write result to /tmp/loop2_status.txt → either "ISSUES_FIXED" or "ALL_CLEAR"
+            - ALWAYS write the loop status file as the FINAL action (required for workflow control)
+            - Status file must contain exactly one line: either "ISSUES_FIXED" or "ALL_CLEAR"
 
             ## STEP 1 — RE-REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
@@ -187,19 +290,31 @@ jobs:
               "## 🔧 Auto-Fix Applied — Loop 2/3
                Fixed: [list fixes]
                🔄 Loop 3 will re-review..."
-            - Write "ISSUES_FIXED" to /tmp/loop2_status.txt
+            - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_FIXED" > "${{ runner.temp }}/claude-review/loop2_status.txt"
 
             ## IF NO ISSUES FOUND:
             - Post comment:
               "## ✅ All Clear after Loop 2/3 — All issues resolved!
                👨‍💻 PR is ready for your review and approval."
-            - Write "ALL_CLEAR" to /tmp/loop2_status.txt
+            - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ALL_CLEAR" > "${{ runner.temp }}/claude-review/loop2_status.txt"
+
+      - name: Sync Loop 2 Status
+        if: always() && steps.check1.outputs.status != 'ALL_CLEAR'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          "$CLAUDE_STATUS_DIR/sync_status.sh" 2 \
+            "$CLAUDE_STATUS_DIR/loop2_status.txt" \
+            "${{ steps.pr-info.outputs.pr_number }}" \
+            "${{ github.repository }}" \
+            "ALL_CLEAR" \
+            "$CLAUDE_STATUS_DIR/read_status.sh"
 
       - name: Check Loop 2 Status
         id: check2
         if: steps.check1.outputs.status != 'ALL_CLEAR'
         run: |
-          STATUS=$(cat /tmp/loop2_status.txt 2>/dev/null || echo "ISSUES_FIXED")
+          STATUS=$(tr -d '[:space:]' < "$CLAUDE_STATUS_DIR/loop2_status.txt")
           echo "status=$STATUS" >> $GITHUB_OUTPUT
           echo "Loop 2 status: $STATUS"
 
@@ -217,18 +332,21 @@ jobs:
           allowed_bots: '*'
           claude_args: >-
             --model claude-sonnet-4-6
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Edit,Write,Read,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(grep:*),Bash(rm:*),Bash(echo:*),Bash(mkdir:*)"
           prompt: |
             You are a fully autonomous code reviewer and fixer. This is LOOP 3 of 3 — FINAL LOOP.
             PR Number: ${{ steps.pr-info.outputs.pr_number }}
             Loops 1 and 2 already applied fixes — do one final review and fix attempt.
+            Status file (MANDATORY): ${{ runner.temp }}/claude-review/loop3_status.txt
 
             ## STRICT RULES:
             - NEVER ask developer to fix anything
             - NEVER delete files listed in /tmp/existing_files.txt
             - You MAY delete files listed in /tmp/new_files.txt if problematic
             - This is the LAST loop — fix everything possible
-            - Write result to /tmp/loop3_status.txt → either "ALL_CLEAR" or "ISSUES_REMAIN"
+            - ALWAYS write the loop status file as the FINAL action (required for workflow control)
+            - Status file must contain exactly one line: either "ALL_CLEAR" or "ISSUES_REMAIN"
+
             ## STEP 1 — FINAL REVIEW:
             - Run: gh pr diff ${{ steps.pr-info.outputs.pr_number }}
             - Review ALL changed files one final time
@@ -244,7 +362,7 @@ jobs:
                All issues resolved across 3 loops.
                **All fixes applied:** [complete list]
                👨‍💻 PR is ready for your review and approval."
-            - Write "ALL_CLEAR" to /tmp/loop3_status.txt
+            - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ALL_CLEAR" > "${{ runner.temp }}/claude-review/loop3_status.txt"
 
             ## IF ISSUES STILL REMAIN AFTER LOOP 3:
             - Post this comment:
@@ -252,7 +370,22 @@ jobs:
                **Auto-fixed:** [list everything fixed in loops 1, 2 and 3]
                **Still requires attention:** [list remaining issues with filename and line]
                🔍 **These issues need developer review before merging.**"
-            - Write "ISSUES_REMAIN" to /tmp/loop3_status.txt
+            - Run exactly: mkdir -p "${{ runner.temp }}/claude-review" && echo "ISSUES_REMAIN" > "${{ runner.temp }}/claude-review/loop3_status.txt"
+
+      - name: Sync Loop 3 Status
+        if: |
+          always() &&
+          steps.check1.outputs.status != 'ALL_CLEAR' &&
+          steps.check2.outputs.status != 'ALL_CLEAR'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          "$CLAUDE_STATUS_DIR/sync_status.sh" 3 \
+            "$CLAUDE_STATUS_DIR/loop3_status.txt" \
+            "${{ steps.pr-info.outputs.pr_number }}" \
+            "${{ github.repository }}" \
+            "ISSUES_REMAIN" \
+            "$CLAUDE_STATUS_DIR/read_status.sh"
 
       - name: Check Loop 3 Status
         id: check3
@@ -260,7 +393,6 @@ jobs:
           steps.check1.outputs.status != 'ALL_CLEAR' &&
           steps.check2.outputs.status != 'ALL_CLEAR'
         run: |
-          STATUS=$(cat /tmp/loop3_status.txt 2>/dev/null || echo "ISSUES_REMAIN")
+          STATUS=$(tr -d '[:space:]' < "$CLAUDE_STATUS_DIR/loop3_status.txt")
           echo "status=$STATUS" >> $GITHUB_OUTPUT
           echo "Loop 3 status: $STATUS"
-
