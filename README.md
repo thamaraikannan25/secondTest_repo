@@ -1,6 +1,6 @@
 # secondTest_repo
 
-## Setup Firestore
+## Setup Firestore document
 
 For instructions on setting up the Firestore Emulator in your local environment, refer to the following guide:
 
