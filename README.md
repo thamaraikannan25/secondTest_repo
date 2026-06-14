@@ -62,20 +62,6 @@ Set your Anthropic API key:
 export ANTHROPIC_API_KEY=your_api_key_here
 ```
 
-### Usage
-
-```bash
-node review.js
-```
-
-If `ANTHROPIC_API_KEY` is not set, the script exits in dry-run mode without making API calls.
-
-You can override the default model with the `CLAUDE_MODEL` environment variable:
-
-```bash
-CLAUDE_MODEL=claude-opus-4-8 node review.js
-```
-
 ## Requirements
 
 - Node.js 16+
