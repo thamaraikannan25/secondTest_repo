@@ -217,6 +217,47 @@ jobs:
           gh pr view --json labels | grep -q tensure-claude-bot || gh pr edit --add-label "tensure-claude-bot"
           echo "PR_URL=$PR_URL" >> /tmp/pr_summary.txt
 
+      - name: Link PR to Issue (Development Sidebar)
+        id: link-pr-issue
+        if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && steps.create-pr.outputs.pr_number != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner       = context.repo.owner;
+            const repo        = context.repo.repo;
+            const issueNumber = context.issue.number;
+            const prNumber    = parseInt('${{ steps.create-pr.outputs.pr_number }}');
+
+            // Step 1: Get both node IDs
+            const { data: pr }    = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+
+            // Step 2: Use the only public GraphQL mutation that populates
+            // the Development sidebar — works regardless of default branch
+            const result = await github.graphql(`
+              mutation LinkPRToIssue($pullRequestId: ID!, $issueId: ID!) {
+                updatePullRequest(input: {
+                  pullRequestId: $pullRequestId,
+                  closingIssuesReferences: [$issueId]
+                }) {
+                  pullRequest {
+                    number
+                    closingIssuesReferences(first: 5) {
+                      nodes { number }
+                    }
+                  }
+                }
+              }
+            `, {
+              pullRequestId: pr.node_id,
+              issueId:       issue.node_id,
+            });
+
+            const linked = result?.updatePullRequest?.pullRequest
+              ?.closingIssuesReferences?.nodes?.map(n => `#${n.number}`).join(', ');
+            console.log(`✅ PR #${prNumber} now linked to issue(s): ${linked}`);
+      
       - name: Post Success Comment
         id: post-success
         if: steps.eligibility.outputs.eligible == 'true' && steps.blocked.outputs.blocked != 'true' && steps.create-pr.outputs.pr_url != ''
