@@ -200,18 +200,18 @@ jobs:
             --head ${{ steps.branch.outputs.branch_name }} \
             --label "claude-review" \
             --body "$(cat <<BODY
-          ## 🤖 Claude Implementation
-          Fixes #${{ github.event.issue.number }}
-          ## Summary
-          ${IMPL}
-          ## Changes Made
-          **Files Created:** ${FC} | **Files Modified:** ${FM} | **Tests Written:** ${TW}
-          ## Known Limitations
-          ${KL}
-          ## Risks
-          ${RK}
-          BODY
-          )")
+## 🤖 Claude Implementation
+Fixes #${{ github.event.issue.number }}
+## Summary
+${IMPL}
+## Changes Made
+**Files Created:** ${FC} | **Files Modified:** ${FM} | **Tests Written:** ${TW}
+## Known Limitations
+${KL}
+## Risks
+${RK}
+BODY
+)")
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
           echo "pr_number=${PR_URL##*/}" >> $GITHUB_OUTPUT
           gh pr view --json labels | grep -q tensure-claude-bot || gh pr edit --add-label "tensure-claude-bot"
