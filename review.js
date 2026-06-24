@@ -4,7 +4,7 @@ const model = process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
 
 // TEMP: remove once real API key is added
 const isDryRun = !process.env.ANTHROPIC_API_KEY || 
-                 process.env.ANTHROPIC_API_KEY === 'placeholder';
+                 process.env.ANTHROPIC_API_KEY === 'test';
 
 if (isDryRun) {
   console.log("DRY RUN: API key not set yet, skipping Claude call");
